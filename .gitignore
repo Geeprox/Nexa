@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+.env
+.env.*
+.DS_Store
+src-tauri/target
+.coverage-tmp
+coverage
+dist
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/StoreLogo.png

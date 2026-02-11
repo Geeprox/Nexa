@@ -1,0 +1,62 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build macOS Bundle
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS artifacts
+        run: ./scripts/build-macos.sh --skip-install --skip-tests
+
+      - name: Zip app bundle
+        run: |
+          APP_RELATIVE_PATH="$(node -e "const m=require('./dist/releases/macos/latest.json'); if(!m.appBundlePath){process.exit(1)}; process.stdout.write(m.appBundlePath);")"
+          APP_BUNDLE_NAME="$(basename "$APP_RELATIVE_PATH")"
+          VERSION_NAME="${GITHUB_REF_NAME:-manual}"
+          ZIP_PATH="dist/releases/macos/Nexa-${VERSION_NAME}.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_RELATIVE_PATH" "$ZIP_PATH"
+          echo "APP_ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexa-macos-${{ github.ref_name || 'manual' }}
+          path: |
+            dist/releases/macos/latest.json
+            ${{ env.APP_ZIP_PATH }}
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/releases/macos/latest.json
+            ${{ env.APP_ZIP_PATH }}
