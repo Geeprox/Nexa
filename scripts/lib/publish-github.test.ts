@@ -26,7 +26,7 @@ afterEach(() => {
 
 describe("publish-github script", () => {
   it("fails when --repo is missing", () => {
-    const result = spawnSync("bash", [publishScript], {
+    const result = spawnSync("/bin/bash", [publishScript], {
       cwd: projectRoot,
       encoding: "utf-8"
     });
@@ -36,12 +36,12 @@ describe("publish-github script", () => {
   });
 
   it("fails when gh is not installed", () => {
-    const result = spawnSync("bash", [publishScript, "--repo", "owner/Nexa"], {
+    const result = spawnSync("/bin/bash", [publishScript, "--repo", "owner/Nexa"], {
       cwd: projectRoot,
       encoding: "utf-8",
       env: {
         ...process.env,
-        PATH: "/usr/bin:/bin"
+        GH_BIN: "gh-command-not-found"
       }
     });
 
@@ -62,7 +62,7 @@ exit 0
 `
     );
 
-    const result = spawnSync("bash", [publishScript, "--repo", "owner/Nexa"], {
+    const result = spawnSync("/bin/bash", [publishScript, "--repo", "owner/Nexa"], {
       cwd: projectRoot,
       encoding: "utf-8",
       env: {
@@ -108,7 +108,7 @@ exit 0
 `
     );
 
-    const result = spawnSync("bash", [publishScript, "--repo", "owner/Nexa", "--public"], {
+    const result = spawnSync("/bin/bash", [publishScript, "--repo", "owner/Nexa", "--public"], {
       cwd: projectRoot,
       encoding: "utf-8",
       env: {
@@ -163,7 +163,7 @@ exit 1
 `
     );
 
-    const result = spawnSync("bash", [publishScript, "--repo", "owner/Nexa", "--private"], {
+    const result = spawnSync("/bin/bash", [publishScript, "--repo", "owner/Nexa", "--private"], {
       cwd: projectRoot,
       encoding: "utf-8",
       env: {

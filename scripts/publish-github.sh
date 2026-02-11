@@ -15,6 +15,7 @@ EOF
 
 REPO=""
 VISIBILITY="public"
+GH_BIN="${GH_BIN:-gh}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,12 +49,12 @@ if [[ -z "$REPO" ]]; then
   exit 1
 fi
 
-if ! command -v gh >/dev/null 2>&1; then
+if ! command -v "$GH_BIN" >/dev/null 2>&1; then
   echo "gh CLI is required but not found."
   exit 1
 fi
 
-if ! gh auth status >/dev/null 2>&1; then
+if ! "$GH_BIN" auth status >/dev/null 2>&1; then
   echo "GitHub CLI is not authenticated. Run: gh auth login"
   exit 1
 fi
@@ -61,7 +62,7 @@ fi
 cd "$PROJECT_ROOT"
 
 if [[ -z "$(git remote)" ]]; then
-  gh repo create "$REPO" "--$VISIBILITY" --source . --remote origin --push
+  "$GH_BIN" repo create "$REPO" "--$VISIBILITY" --source . --remote origin --push
 else
   git push -u origin "$(git branch --show-current)"
 fi
