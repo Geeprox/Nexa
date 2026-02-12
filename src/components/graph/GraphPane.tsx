@@ -265,7 +265,7 @@ export function GraphPane({
         source: node.parentId as string,
         target: node.id,
         animated: false,
-        type: "smoothstep",
+        type: "simplebezier",
         style: {
           stroke:
             node.id === activeNodeId || node.parentId === activeNodeId
@@ -286,9 +286,13 @@ export function GraphPane({
         if (!previous) {
           return node;
         }
+
+        // Preserve live-drag positioning, but allow external position updates
+        // (e.g. collision resolution) to land when not dragging.
+        const isDragging = Boolean((previous as unknown as { dragging?: boolean }).dragging);
         return {
           ...node,
-          position: previous.position
+          position: isDragging ? previous.position : node.position
         };
       });
     });
@@ -519,7 +523,7 @@ export function GraphPane({
           nodeTypes={nodeTypes}
           minZoom={0.3}
           maxZoom={1.6}
-          connectionLineType={ConnectionLineType.SmoothStep}
+          connectionLineType={ConnectionLineType.Bezier}
           onNodesChange={onNodesChange}
           onNodeClick={handleNodeClick}
           onNodeDragStop={handleNodeDragStop}

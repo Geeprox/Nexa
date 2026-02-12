@@ -12,7 +12,7 @@ import {
   Telescope,
   X
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
@@ -36,12 +36,20 @@ interface ChatComposerProps {
 export function ChatComposer({ quotePreview, onClearQuote, onSendMessage }: ChatComposerProps) {
   const [draft, setDraft] = useState("");
   const [isToolsOpen, setIsToolsOpen] = useState(false);
+  const lastSubmitRef = useRef<{ value: string; at: number } | null>(null);
 
   const handleSubmitDraft = useCallback(() => {
     const value = draft.trim();
     if (!value) {
       return;
     }
+
+    const now = Date.now();
+    const last = lastSubmitRef.current;
+    if (last && last.value === value && now - last.at < 500) {
+      return;
+    }
+    lastSubmitRef.current = { value, at: now };
 
     onSendMessage(value);
     setDraft("");

@@ -50,6 +50,17 @@ describe("HomePage", () => {
     expect(screen.getAllByTestId(/assistant-group-/)).toHaveLength(3);
   });
 
+  it("does not send duplicate message on rapid double Enter", () => {
+    render(<HomePage />);
+
+    const input = screen.getByLabelText("聊天输入");
+    fireEvent.change(input, { target: { value: "double enter dedupe sentinel" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(screen.getAllByText("double enter dedupe sentinel")).toHaveLength(1);
+  });
+
   it("prepares quote first and switches to graph only after sending follow-up", () => {
     render(<HomePage />);
 

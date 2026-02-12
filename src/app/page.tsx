@@ -21,6 +21,7 @@ import { SettingsModal } from "@/components/settings/SettingsModal";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { streamMockProviderResponse } from "@/lib/llm/mockProvider";
 import { logError, logInfo } from "@/lib/logging/logger";
+import { resolveNonOverlappingPosition } from "@/lib/graph/layout";
 import { INITIAL_CHAT_TURNS } from "@/lib/mock/chatResponses";
 import { ConversationSnapshot } from "@/lib/session/conversationSnapshot";
 import {
@@ -39,6 +40,9 @@ interface PendingBranchDraft {
   quoteText: string;
   quotePreview: string;
 }
+
+const GRAPH_COLUMN_GAP_X = 640;
+const GRAPH_ROW_GAP_Y = 260;
 
 function createInitialMessagesByNode(): Record<string, ChatMessage[]> {
   const rootMessages: ChatMessage[] = [];
@@ -190,13 +194,13 @@ function buildPromptWithQuote(question: string, pendingBranch: PendingBranchDraf
 function nextBranchPosition(allNodes: GraphNode[], parentId: string) {
   const parent = allNodes.find((node) => node.id === parentId);
   if (!parent) {
-    return { x: 380, y: 160 };
+    return { x: 40 + GRAPH_COLUMN_GAP_X, y: 160 };
   }
 
   const children = allNodes.filter((node) => node.parentId === parentId);
   return {
-    x: parent.position.x + 360,
-    y: parent.position.y + children.length * 200
+    x: parent.position.x + GRAPH_COLUMN_GAP_X,
+    y: parent.position.y + children.length * GRAPH_ROW_GAP_Y
   };
 }
 
@@ -258,7 +262,7 @@ function buildTurnTopologyFromLinearMessages(linearMessages: ChatMessage[]) {
       title: toBranchTitle(userMessage.content || `Turn ${index + 1}`),
       createdAt: new Date(Date.now() + index * 1000).toISOString(),
       position: {
-        x: 40 + index * 360,
+        x: 40 + index * GRAPH_COLUMN_GAP_X,
         y: 160
       }
     });
@@ -665,6 +669,18 @@ export default function HomePage() {
             quotedNodeId: pendingBranchDraft?.sourceNodeId
           };
 
+          const proposedPosition = nextBranchPosition(topology.nodes, parentNodeId);
+          const nextMessagesByNode = {
+            ...topology.messagesByNode,
+            [nextNodeId]: [userMessage]
+          };
+          const resolvedPosition = resolveNonOverlappingPosition({
+            nodes: topology.nodes,
+            messagesByNode: nextMessagesByNode,
+            candidateNodeId: nextNodeId,
+            candidatePosition: proposedPosition
+          });
+
           return {
             ...currentSnapshot,
             nodes: [
@@ -674,13 +690,10 @@ export default function HomePage() {
                 parentId: parentNodeId,
                 title: toBranchTitle(trimmed),
                 createdAt: new Date().toISOString(),
-                position: nextBranchPosition(topology.nodes, parentNodeId)
+                position: resolvedPosition
               }
             ],
-            messagesByNode: {
-              ...topology.messagesByNode,
-              [nextNodeId]: [userMessage]
-            },
+            messagesByNode: nextMessagesByNode,
             activeNodeId: nextNodeId
           };
         });
@@ -702,6 +715,18 @@ export default function HomePage() {
             quotedNodeId: pendingBranchDraft?.sourceNodeId
           };
 
+          const proposedPosition = nextBranchPosition(currentSnapshot.nodes, parentNodeId);
+          const nextMessagesByNode = {
+            ...currentSnapshot.messagesByNode,
+            [nextNodeId]: [userMessage]
+          };
+          const resolvedPosition = resolveNonOverlappingPosition({
+            nodes: currentSnapshot.nodes,
+            messagesByNode: nextMessagesByNode,
+            candidateNodeId: nextNodeId,
+            candidatePosition: proposedPosition
+          });
+
           return {
             ...currentSnapshot,
             nodes: [
@@ -711,13 +736,10 @@ export default function HomePage() {
                 parentId: parentNodeId,
                 title: toBranchTitle(trimmed),
                 createdAt: new Date().toISOString(),
-                position: nextBranchPosition(currentSnapshot.nodes, parentNodeId)
+                position: resolvedPosition
               }
             ],
-            messagesByNode: {
-              ...currentSnapshot.messagesByNode,
-              [nextNodeId]: [userMessage]
-            },
+            messagesByNode: nextMessagesByNode,
             activeNodeId: nextNodeId
           };
         });
@@ -826,10 +848,22 @@ export default function HomePage() {
         return;
       }
 
-      commitSnapshot(activeConversation.id, (snapshot) => ({
-        ...snapshot,
-        nodes: snapshot.nodes.map((node) => (node.id === nodeId ? { ...node, position } : node))
-      }));
+      commitSnapshot(activeConversation.id, (snapshot) => {
+        const nextNodes = snapshot.nodes.map((node) => (node.id === nodeId ? { ...node, position } : node));
+        const resolvedPosition = resolveNonOverlappingPosition({
+          nodes: nextNodes,
+          messagesByNode: snapshot.messagesByNode,
+          candidateNodeId: nodeId,
+          candidatePosition: position
+        });
+
+        return {
+          ...snapshot,
+          nodes: nextNodes.map((node) =>
+            node.id === nodeId ? { ...node, position: resolvedPosition } : node
+          )
+        };
+      });
     },
     [activeConversation, commitSnapshot]
   );
