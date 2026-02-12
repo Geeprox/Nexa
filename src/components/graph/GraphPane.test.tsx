@@ -18,19 +18,35 @@ const nodes: GraphNode[] = [
     position: { x: 280, y: 120 }
   }
 ];
+
 const messagesByNode = {
   root: [
-    { role: "user" as const, content: "如何开始比较？" },
-    { role: "assistant" as const, content: "先定义比较维度并建立模板。" }
+    { id: "u-1", nodeId: "root", role: "user" as const, content: "如何开始比较？" },
+    {
+      id: "a-1",
+      nodeId: "root",
+      role: "assistant" as const,
+      content: "先定义比较维度并建立模板。",
+      replyToMessageId: "u-1",
+      retryIndex: 1
+    }
   ],
   "node-1": [
-    { role: "user" as const, content: "给我分支中的执行步骤" },
-    { role: "assistant" as const, content: "可以从样本集、指标、复盘三个阶段推进。" }
+    { id: "u-2", nodeId: "node-1", role: "user" as const, content: "给我分支中的执行步骤" },
+    {
+      id: "a-2",
+      nodeId: "node-1",
+      role: "assistant" as const,
+      content: "可以从样本集、指标、复盘三个阶段推进。",
+      replyToMessageId: "u-2",
+      retryIndex: 1
+    }
   ]
 };
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 describe("GraphPane", () => {
@@ -45,12 +61,14 @@ describe("GraphPane", () => {
         activeNodeId="root"
         onSelectNode={onSelectNode}
         onMoveNode={onMoveNode}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
       />
     );
 
     expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
-    expect(screen.getAllByText(/Q:/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/A:/).length).toBeGreaterThan(0);
+    expect(screen.getByText("如何开始比较？")).toBeInTheDocument();
+    expect(screen.getByText("先定义比较维度并建立模板。")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByTestId("graph-node-node-1")[0]);
     expect(onSelectNode).toHaveBeenCalledWith("node-1");
@@ -64,6 +82,8 @@ describe("GraphPane", () => {
         activeNodeId="root"
         onSelectNode={vi.fn()}
         onMoveNode={vi.fn()}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
       />
     );
 
@@ -81,6 +101,8 @@ describe("GraphPane", () => {
         activeNodeId="root"
         onSelectNode={onSelectNode}
         onMoveNode={vi.fn()}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
       />
     );
 
@@ -88,25 +110,49 @@ describe("GraphPane", () => {
     expect(onSelectNode).toHaveBeenCalledWith("node-1");
   });
 
-  it("supports home/end and reverse navigation on graph canvas", () => {
-    const onSelectNode = vi.fn();
+  it("opens branch action from selected text in graph block", () => {
+    const onCreateBranch = vi.fn();
 
     render(
       <GraphPane
         nodes={nodes}
         messagesByNode={messagesByNode}
-        activeNodeId="node-1"
-        onSelectNode={onSelectNode}
+        activeNodeId="root"
+        onSelectNode={vi.fn()}
         onMoveNode={vi.fn()}
+        onCreateBranch={onCreateBranch}
+        onCreateNote={vi.fn()}
       />
     );
 
-    const canvas = screen.getByTestId("graph-canvas");
-    fireEvent.keyDown(canvas, { key: "ArrowLeft" });
-    fireEvent.keyDown(canvas, { key: "End" });
-    fireEvent.keyDown(canvas, { key: "Home" });
+    const answerText = screen.getByText("先定义比较维度并建立模板。");
+    const textNode = answerText.firstChild as Node;
+    const answerContainer = answerText.closest("[data-graph-message-id]") as HTMLElement;
 
-    expect(onSelectNode).toHaveBeenCalledWith("root");
-    expect(onSelectNode).toHaveBeenCalledWith("node-1");
+    vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => "比较维度",
+      anchorNode: textNode,
+      focusNode: textNode,
+      getRangeAt: () => ({
+        startContainer: textNode,
+        endContainer: textNode,
+        commonAncestorContainer: textNode,
+        getBoundingClientRect: () => ({ left: 150, width: 60, top: 160 }),
+        intersectsNode: (node: Node) => node === answerContainer
+      }),
+      removeAllRanges: vi.fn()
+    } as unknown as Selection);
+
+    fireEvent.mouseUp(screen.getByTestId("graph-canvas"));
+    fireEvent.click(screen.getByRole("button", { name: "Create branch from selection" }));
+
+    expect(onCreateBranch).toHaveBeenCalledWith({
+      mode: "selection",
+      sourceMessageId: "a-1",
+      sourceNodeId: "root",
+      selectedText: "比较维度"
+    });
   });
 });

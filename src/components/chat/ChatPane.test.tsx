@@ -72,42 +72,7 @@ describe("ChatPane", () => {
     expect(removeAllRanges).toHaveBeenCalledTimes(1);
   });
 
-  it("opens branch action from selectionchange event", () => {
-    render(
-      <ChatPane
-        messages={baseMessages}
-        onCreateBranch={vi.fn()}
-        onCreateNote={vi.fn()}
-        onRetryMessage={vi.fn()}
-        onSendMessage={vi.fn()}
-      />
-    );
-
-    const assistantText = screen.getByText("可以先定义评估维度，再做对照实验。");
-    const textNode = assistantText.firstChild as Node;
-    const assistantGroup = screen.getByTestId("assistant-group-m-user-1");
-
-    vi.spyOn(window, "getSelection").mockReturnValue({
-      isCollapsed: false,
-      rangeCount: 1,
-      toString: () => "评估维度",
-      anchorNode: textNode,
-      focusNode: textNode,
-      getRangeAt: () => ({
-        startContainer: textNode,
-        endContainer: textNode,
-        commonAncestorContainer: textNode,
-        getBoundingClientRect: () => ({ left: 140, width: 48, top: 180 }),
-        intersectsNode: (node: Node) => node === assistantGroup
-      }),
-      removeAllRanges: vi.fn()
-    } as unknown as Selection);
-
-    fireEvent(document, new Event("selectionchange"));
-    expect(screen.getByRole("button", { name: "Create branch from selection" })).toBeInTheDocument();
-  });
-
-  it("keeps branch action available on reversed selection via selectionchange", () => {
+  it("keeps branch action available on reversed selection after mouseup", () => {
     render(
       <ChatPane
         messages={baseMessages}
@@ -144,6 +109,50 @@ describe("ChatPane", () => {
     expect(screen.getByRole("button", { name: "Create branch from selection" })).toBeInTheDocument();
 
     outsideNode.remove();
+  });
+
+  it("supports selecting user text and opening branch action", () => {
+    const onCreateBranch = vi.fn();
+
+    render(
+      <ChatPane
+        messages={baseMessages}
+        onCreateBranch={onCreateBranch}
+        onCreateNote={vi.fn()}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    const userText = screen.getByText("如何评估提示词质量？");
+    const textNode = userText.firstChild as Node;
+    const userMessage = screen.getByTestId("chat-message-m-user-1");
+
+    vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => "评估提示词质量",
+      anchorNode: textNode,
+      focusNode: textNode,
+      getRangeAt: () => ({
+        startContainer: textNode,
+        endContainer: textNode,
+        commonAncestorContainer: textNode,
+        getBoundingClientRect: () => ({ left: 160, width: 80, top: 180 }),
+        intersectsNode: (node: Node) => node === userMessage
+      }),
+      removeAllRanges: vi.fn()
+    } as unknown as Selection);
+
+    fireEvent.mouseUp(screen.getByTestId("chat-scroll-area"));
+    fireEvent.click(screen.getByRole("button", { name: "Create branch from selection" }));
+
+    expect(onCreateBranch).toHaveBeenCalledWith({
+      mode: "selection",
+      sourceMessageId: "m-user-1",
+      sourceNodeId: "root",
+      selectedText: "评估提示词质量"
+    });
   });
 
   it("submits user draft on Enter", () => {

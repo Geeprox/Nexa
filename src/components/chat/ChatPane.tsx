@@ -3,25 +3,16 @@
 import {
   ArrowLeft,
   ArrowRight,
-  ArrowUp,
   Copy,
+  CornerUpLeft,
   GitBranchPlus,
-  ImagePlus,
-  Lightbulb,
-  Mic,
-  MoreHorizontal,
   NotebookPen,
-  Paperclip,
-  Plus,
   RotateCcw,
-  Share2,
-  ShoppingBag,
-  Telescope
+  Share2
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Separator } from "@/components/ui/separator";
+import { ChatComposer } from "@/components/chat/ChatComposer";
 import { logError } from "@/lib/logging/logger";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +24,10 @@ export interface ChatMessage {
   replyToMessageId?: string;
   retryIndex?: number;
   isStreaming?: boolean;
+  quotedText?: string;
+  quotePreview?: string;
+  quotedMessageId?: string;
+  quotedNodeId?: string;
 }
 
 export type BranchCreatePayload =
@@ -72,6 +67,8 @@ interface BranchActionState {
 interface ChatPaneProps {
   messages: ChatMessage[];
   focusedMessageId?: string | null;
+  quotePreview?: string | null;
+  onClearQuote?: () => void;
   onCreateBranch: (payload: BranchCreatePayload) => void;
   onCreateNote: (payload: NoteCreatePayload) => void;
   onRetryMessage: (payload: RetryMessagePayload) => void;
@@ -91,26 +88,31 @@ interface AssistantGroupBlock {
 
 type RenderBlock = MessageBlock | AssistantGroupBlock;
 
-const toolActions = [
-  { label: "添加照片和文件", icon: Paperclip, shortcut: "⌘U", emphasized: true },
-  { label: "创建图片", icon: ImagePlus },
-  { label: "思考", icon: Lightbulb },
-  { label: "深度研究", icon: Telescope },
-  { label: "智能购物", icon: ShoppingBag },
-  { label: "更多", icon: MoreHorizontal }
-] as const;
+function toQuotedPreview(message: ChatMessage) {
+  const source = message.quotePreview ?? message.quotedText;
+  if (!source) {
+    return null;
+  }
+
+  const compact = source.trim().replace(/\s+/g, " ");
+  if (!compact) {
+    return null;
+  }
+
+  return compact.length <= 120 ? compact : `${compact.slice(0, 120)}...`;
+}
 
 export function ChatPane({
   messages,
   focusedMessageId,
+  quotePreview,
+  onClearQuote,
   onCreateBranch,
   onCreateNote,
   onRetryMessage,
   onSendMessage
 }: ChatPaneProps) {
   const [branchAction, setBranchAction] = useState<BranchActionState | null>(null);
-  const [draft, setDraft] = useState("");
-  const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [activeRetryByGroup, setActiveRetryByGroup] = useState<Record<string, number>>({});
   const previousGroupCountsRef = useRef<Record<string, number>>({});
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
@@ -119,8 +121,8 @@ export function ChatPane({
     setBranchAction(null);
   }, []);
 
-  const findAssistantMessageElement = useCallback((selection: Selection, range: Range) => {
-    const selector = "[data-message-role='assistant'][data-message-id][data-node-id]";
+  const findMessageElement = useCallback((selection: Selection, range: Range) => {
+    const selector = "[data-message-id][data-node-id]";
     const resolveFromNode = (node: Node | null) => {
       if (!node) {
         return null;
@@ -148,14 +150,14 @@ export function ChatPane({
       return null;
     }
 
-    const assistantMessageElements = scrollAreaRef.current.querySelectorAll<HTMLElement>(selector);
-    for (const messageElement of assistantMessageElements) {
+    const messageElements = scrollAreaRef.current.querySelectorAll<HTMLElement>(selector);
+    for (const messageElement of messageElements) {
       try {
         if (range.intersectsNode(messageElement)) {
           return messageElement;
         }
       } catch {
-        // Range may become detached during rapid DOM updates.
+        // Ignore detached ranges from rapid DOM updates.
       }
     }
 
@@ -239,7 +241,7 @@ export function ChatPane({
     }
 
     const range = selection.getRangeAt(0);
-    const messageElement = findAssistantMessageElement(selection, range);
+    const messageElement = findMessageElement(selection, range);
 
     if (!messageElement || !scrollAreaRef.current?.contains(messageElement)) {
       hideBranchAction();
@@ -255,7 +257,8 @@ export function ChatPane({
 
     const rect = range.getBoundingClientRect();
     const fallbackRect = messageElement.getBoundingClientRect();
-    const left = rect.width > 0 ? rect.left + rect.width / 2 : fallbackRect.left + Math.min(120, fallbackRect.width / 2);
+    const left =
+      rect.width > 0 ? rect.left + rect.width / 2 : fallbackRect.left + Math.min(120, fallbackRect.width / 2);
     const top = rect.top > 0 ? rect.top : fallbackRect.top;
 
     setBranchAction({
@@ -265,7 +268,7 @@ export function ChatPane({
       sourceNodeId,
       selectedText
     });
-  }, [findAssistantMessageElement, hideBranchAction]);
+  }, [findMessageElement, hideBranchAction]);
 
   const handleBranchFromSelection = useCallback(() => {
     if (!branchAction) {
@@ -298,17 +301,6 @@ export function ChatPane({
     window.getSelection()?.removeAllRanges();
     hideBranchAction();
   }, [branchAction, hideBranchAction, onCreateNote]);
-
-  useEffect(() => {
-    const handleSelectionChange = () => {
-      updateBranchActionFromSelection();
-    };
-
-    document.addEventListener("selectionchange", handleSelectionChange);
-    return () => {
-      document.removeEventListener("selectionchange", handleSelectionChange);
-    };
-  }, [updateBranchActionFromSelection]);
 
   useEffect(() => {
     if (!branchAction) {
@@ -361,17 +353,6 @@ export function ChatPane({
     }
   }, []);
 
-  const handleSubmitDraft = useCallback(() => {
-    const value = draft.trim();
-    if (!value) {
-      return;
-    }
-
-    onSendMessage(value);
-    setDraft("");
-    setIsToolsOpen(false);
-  }, [draft, onSendMessage]);
-
   return (
     <div className="flex h-full flex-col">
       <div
@@ -380,12 +361,11 @@ export function ChatPane({
         className="flex-1 space-y-5 overflow-auto px-6 py-6"
         onMouseUp={updateBranchActionFromSelection}
         onPointerUp={updateBranchActionFromSelection}
-        onKeyUp={updateBranchActionFromSelection}
         onScroll={hideBranchAction}
       >
         {messages.length === 0 ? (
           <div className="rounded-xl border border-dashed bg-card/80 px-4 py-6 text-sm text-muted-foreground">
-            当前分支暂无消息，输入问题后将以流式 Mock 回复。
+            当前会话暂无消息，输入问题后将以流式 Mock 回复。
           </div>
         ) : null}
 
@@ -397,6 +377,7 @@ export function ChatPane({
                 ? "ml-auto max-w-[78%] bg-secondary/90 text-secondary-foreground"
                 : "max-w-[80%] bg-card";
             const focusedClass = message.id === focusedMessageId ? "border-ring/50 ring-2 ring-ring/40" : "";
+            const quotedPreview = toQuotedPreview(message);
 
             return (
               <div
@@ -411,6 +392,15 @@ export function ChatPane({
                   focusedClass
                 )}
               >
+                {quotedPreview ? (
+                  <div className="mb-2 rounded-xl border bg-background/50 px-2.5 py-2 text-xs text-muted-foreground">
+                    <div className="mb-1 flex items-center gap-1">
+                      <CornerUpLeft className="h-3.5 w-3.5" />
+                      <span>Quoted context</span>
+                    </div>
+                    <p className="whitespace-pre-wrap">“{quotedPreview}”</p>
+                  </div>
+                ) : null}
                 <span className="select-text whitespace-pre-wrap">{message.content}</span>
               </div>
             );
@@ -585,72 +575,7 @@ export function ChatPane({
         </div>
       ) : null}
 
-      <div className="border-t bg-background/90 px-6 py-4">
-        <div className="mx-auto flex max-w-4xl items-center gap-2 rounded-3xl border bg-card p-2 shadow-sm">
-          <Popover open={isToolsOpen} onOpenChange={setIsToolsOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="打开附件菜单"
-                className="h-9 w-9 rounded-full"
-              >
-                <Plus className="h-5 w-5" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-[320px] rounded-2xl p-2">
-              <div className="space-y-1">
-                {toolActions.map((action, index) => (
-                  <div key={action.label}>
-                    <button
-                      type="button"
-                      className={cn(
-                        "flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground",
-                        action.emphasized ? "bg-muted" : ""
-                      )}
-                      onClick={() => setIsToolsOpen(false)}
-                    >
-                      <action.icon className="h-5 w-5 text-foreground/90" />
-                      <span className="flex-1">{action.label}</span>
-                      {action.shortcut ? <span className="text-xs text-muted-foreground">{action.shortcut}</span> : null}
-                    </button>
-                    {index === 0 ? <Separator className="my-1" /> : null}
-                  </div>
-                ))}
-              </div>
-            </PopoverContent>
-          </Popover>
-
-          <input
-            aria-label="聊天输入"
-            className="h-9 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
-            placeholder="输入你的问题，按 Enter 发送"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                handleSubmitDraft();
-              }
-            }}
-          />
-
-          <Button type="button" variant="ghost" size="icon" aria-label="语音输入" className="h-9 w-9 rounded-full">
-            <Mic className="h-5 w-5" />
-          </Button>
-
-          <Button
-            type="button"
-            size="icon"
-            aria-label="发送消息"
-            className="h-9 w-9 rounded-full bg-foreground text-background hover:bg-foreground/90"
-            onClick={handleSubmitDraft}
-          >
-            <ArrowUp className="h-5 w-5" />
-          </Button>
-        </div>
-      </div>
+      <ChatComposer quotePreview={quotePreview} onClearQuote={onClearQuote} onSendMessage={onSendMessage} />
     </div>
   );
 }

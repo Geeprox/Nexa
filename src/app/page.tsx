@@ -8,15 +8,16 @@ import {
   NoteCreatePayload,
   RetryMessagePayload
 } from "@/components/chat/ChatPane";
+import { ChatComposer } from "@/components/chat/ChatComposer";
 import {
   ConversationListPane,
   ConversationSummary
 } from "@/components/conversation/ConversationListPane";
 import { GraphNode, GraphPane } from "@/components/graph/GraphPane";
 import { Sidebar, SidebarSection } from "@/components/layout/Sidebar";
+import { TopBar } from "@/components/layout/TopBar";
 import { NotesPane } from "@/components/notes/NotesPane";
 import { SettingsModal } from "@/components/settings/SettingsModal";
-import { TopBar } from "@/components/layout/TopBar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { streamMockProviderResponse } from "@/lib/llm/mockProvider";
 import { logError, logInfo } from "@/lib/logging/logger";
@@ -30,6 +31,14 @@ import {
   loadWorkspaceState,
   saveWorkspaceState
 } from "@/lib/session/workspaceState";
+
+interface PendingBranchDraft {
+  sourceNodeId: string;
+  sourceMessageId: string;
+  mode: "selection" | "clone";
+  quoteText: string;
+  quotePreview: string;
+}
 
 function createInitialMessagesByNode(): Record<string, ChatMessage[]> {
   const rootMessages: ChatMessage[] = [];
@@ -157,39 +166,133 @@ function toBranchTitle(text: string) {
   return `${compact.slice(0, 20)}...`;
 }
 
+function hasBranchNodes(snapshot: ConversationSnapshot) {
+  return snapshot.nodes.some((node) => node.parentId !== null);
+}
+
+function toQuotePreview(text: string, limit = 100) {
+  const compact = text.trim().replace(/\s+/g, " ");
+  if (!compact) {
+    return "";
+  }
+
+  return compact.length <= limit ? compact : `${compact.slice(0, limit)}...`;
+}
+
+function buildPromptWithQuote(question: string, pendingBranch: PendingBranchDraft | null) {
+  if (!pendingBranch) {
+    return question;
+  }
+
+  return `${question}\n\nPlease prioritize the quoted context below for this response:\n${pendingBranch.quoteText}`;
+}
+
 function nextBranchPosition(allNodes: GraphNode[], parentId: string) {
   const parent = allNodes.find((node) => node.id === parentId);
   if (!parent) {
-    return { x: 380, y: 140 };
+    return { x: 380, y: 160 };
   }
 
   const children = allNodes.filter((node) => node.parentId === parentId);
   return {
-    x: parent.position.x + 300,
-    y: parent.position.y + children.length * 168
+    x: parent.position.x + 360,
+    y: parent.position.y + children.length * 200
   };
 }
 
-function cloneConversationContext(
-  sourceMessages: ChatMessage[],
-  sourceMessageId: string,
-  targetNodeId: string
-) {
-  const cutoffIndex = sourceMessages.findIndex((message) => message.id === sourceMessageId);
-  const slice = cutoffIndex >= 0 ? sourceMessages.slice(0, cutoffIndex + 1) : sourceMessages;
+function resolveLinearRootNode(snapshot: ConversationSnapshot) {
+  return snapshot.nodes.find((node) => node.parentId === null)?.id ?? snapshot.activeNodeId;
+}
 
-  const idMap = new Map<string, string>();
-  for (const message of slice) {
-    idMap.set(message.id, `m-${crypto.randomUUID().slice(0, 8)}`);
+function buildTurnTopologyFromLinearMessages(linearMessages: ChatMessage[]) {
+  const userMessages = linearMessages.filter((message) => message.role === "user");
+  const assistantByPrompt = new Map<string, ChatMessage[]>();
+  for (const message of linearMessages) {
+    if (message.role !== "assistant" || !message.replyToMessageId) {
+      continue;
+    }
+
+    const bucket = assistantByPrompt.get(message.replyToMessageId) ?? [];
+    bucket.push(message);
+    assistantByPrompt.set(message.replyToMessageId, bucket);
   }
 
-  return slice.map((message) => ({
-    ...message,
-    id: idMap.get(message.id) ?? `m-${crypto.randomUUID().slice(0, 8)}`,
-    nodeId: targetNodeId,
-    replyToMessageId: message.replyToMessageId ? idMap.get(message.replyToMessageId) : undefined,
-    isStreaming: false
-  }));
+  const messageNodeMap = new Map<string, string>();
+  const nodes: GraphNode[] = [];
+  const messagesByNode: Record<string, ChatMessage[]> = {};
+
+  let previousNodeId: string | null = null;
+
+  for (let index = 0; index < userMessages.length; index += 1) {
+    const userMessage = userMessages[index];
+    const nodeId = `node-turn-${index + 1}-${crypto.randomUUID().slice(0, 6)}`;
+
+    const assistantVariants = assistantByPrompt.get(userMessage.id) ?? [];
+    const activeAssistant = assistantVariants.at(-1);
+
+    const nextBucket: ChatMessage[] = [
+      {
+        ...userMessage,
+        nodeId
+      }
+    ];
+
+    if (activeAssistant) {
+      nextBucket.push({
+        ...activeAssistant,
+        nodeId,
+        isStreaming: false,
+        retryIndex: 1
+      });
+    }
+
+    messagesByNode[nodeId] = nextBucket;
+    messageNodeMap.set(userMessage.id, nodeId);
+    for (const assistant of assistantVariants) {
+      messageNodeMap.set(assistant.id, nodeId);
+    }
+
+    nodes.push({
+      id: nodeId,
+      parentId: previousNodeId,
+      title: toBranchTitle(userMessage.content || `Turn ${index + 1}`),
+      createdAt: new Date(Date.now() + index * 1000).toISOString(),
+      position: {
+        x: 40 + index * 360,
+        y: 160
+      }
+    });
+
+    previousNodeId = nodeId;
+  }
+
+  if (nodes.length === 0) {
+    const rootNodeId = `node-turn-root-${crypto.randomUUID().slice(0, 6)}`;
+    nodes.push({
+      id: rootNodeId,
+      parentId: null,
+      title: "Root",
+      createdAt: new Date().toISOString(),
+      position: {
+        x: 40,
+        y: 160
+      }
+    });
+    messagesByNode[rootNodeId] = [];
+    return {
+      nodes,
+      messagesByNode,
+      messageNodeMap,
+      lastNodeId: rootNodeId
+    };
+  }
+
+  return {
+    nodes,
+    messagesByNode,
+    messageNodeMap,
+    lastNodeId: nodes[nodes.length - 1].id
+  };
 }
 
 export default function HomePage() {
@@ -204,6 +307,7 @@ export default function HomePage() {
   const [notes, setNotes] = useState(initialWorkspace.notes);
   const [modelProvider, setModelProvider] = useState(initialWorkspace.modelProvider);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [pendingBranchDraft, setPendingBranchDraft] = useState<PendingBranchDraft | null>(null);
 
   const streamControllersRef = useRef<Map<string, AbortController>>(new Map());
 
@@ -267,6 +371,10 @@ export default function HomePage() {
       });
     }
   }, [activeConversation, conversations, modelProvider, notes]);
+
+  useEffect(() => {
+    setPendingBranchDraft(null);
+  }, [activeConversationId]);
 
   const commitSnapshot = useCallback(
     (
@@ -430,9 +538,7 @@ export default function HomePage() {
                 message.id === assistantMessageId
                   ? {
                       ...message,
-                      content:
-                        content ||
-                        "[Mock provider interrupted. Please retry.]",
+                      content: content || "[Mock provider interrupted. Please retry.]",
                       isStreaming: false
                     }
                   : message
@@ -447,6 +553,44 @@ export default function HomePage() {
     [commitSnapshot, modelProvider.apiKey, modelProvider.providerUrl]
   );
 
+  const handlePrepareBranch = useCallback(
+    (payload: BranchCreatePayload) => {
+      if (!activeConversation) {
+        return;
+      }
+
+      const sourceMessages = activeConversation.snapshot.messagesByNode[payload.sourceNodeId] ?? [];
+      const sourceMessage = sourceMessages.find((message) => message.id === payload.sourceMessageId);
+      if (!sourceMessage) {
+        return;
+      }
+
+      const quoteText =
+        payload.mode === "selection" ? payload.selectedText.trim() : sourceMessage.content.trim();
+      if (!quoteText) {
+        return;
+      }
+
+      setPendingBranchDraft({
+        sourceNodeId: payload.sourceNodeId,
+        sourceMessageId: payload.sourceMessageId,
+        mode: payload.mode,
+        quoteText,
+        quotePreview: toQuotePreview(quoteText, 100)
+      });
+
+      if (activeConversation.snapshot.activeNodeId !== payload.sourceNodeId) {
+        commitSnapshot(activeConversation.id, (snapshot) => ({
+          ...snapshot,
+          activeNodeId: payload.sourceNodeId
+        }));
+      }
+
+      setFocusedMessageId(payload.sourceMessageId);
+    },
+    [activeConversation, commitSnapshot]
+  );
+
   const handleSendMessage = useCallback(
     (value: string) => {
       const trimmed = value.trim();
@@ -455,43 +599,142 @@ export default function HomePage() {
       }
 
       const conversationId = activeConversation.id;
-      const nodeId = activeConversation.snapshot.activeNodeId;
-      const userMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+      const snapshot = activeConversation.snapshot;
+      const branched = hasBranchNodes(snapshot);
 
-      commitSnapshot(
-        conversationId,
-        (snapshot) => {
-          const bucket = snapshot.messagesByNode[nodeId] ?? [];
-          return {
-            ...snapshot,
-            messagesByNode: {
-              ...snapshot.messagesByNode,
-              [nodeId]: [
-                ...bucket,
-                {
-                  id: userMessageId,
-                  nodeId,
-                  role: "user",
-                  content: trimmed
-                }
-              ]
-            }
+      if (!branched && !pendingBranchDraft) {
+        const nodeId = resolveLinearRootNode(snapshot);
+        const userMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+
+        commitSnapshot(
+          conversationId,
+          (currentSnapshot) => {
+            const bucket = currentSnapshot.messagesByNode[nodeId] ?? [];
+            return {
+              ...currentSnapshot,
+              messagesByNode: {
+                ...currentSnapshot.messagesByNode,
+                [nodeId]: [
+                  ...bucket,
+                  {
+                    id: userMessageId,
+                    nodeId,
+                    role: "user",
+                    content: trimmed
+                  }
+                ]
+              }
+            };
+          },
+          {
+            refreshTitle: true
+          }
+        );
+
+        void streamAssistantReply({
+          conversationId,
+          nodeId,
+          prompt: trimmed,
+          replyToMessageId: userMessageId,
+          retryIndex: 1
+        });
+        return;
+      }
+
+      const nextNodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
+      const userMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+      const prompt = buildPromptWithQuote(trimmed, pendingBranchDraft);
+
+      if (!branched) {
+        const linearRootNodeId = resolveLinearRootNode(snapshot);
+        const linearMessages = snapshot.messagesByNode[linearRootNodeId] ?? [];
+        const topology = buildTurnTopologyFromLinearMessages(linearMessages);
+        const parentNodeId =
+          (pendingBranchDraft && topology.messageNodeMap.get(pendingBranchDraft.sourceMessageId)) ??
+          topology.lastNodeId;
+
+        commitSnapshot(conversationId, (currentSnapshot) => {
+          const userMessage: ChatMessage = {
+            id: userMessageId,
+            nodeId: nextNodeId,
+            role: "user",
+            content: trimmed,
+            quotedText: pendingBranchDraft?.quoteText,
+            quotePreview: pendingBranchDraft?.quotePreview,
+            quotedMessageId: pendingBranchDraft?.sourceMessageId,
+            quotedNodeId: pendingBranchDraft?.sourceNodeId
           };
-        },
-        {
-          refreshTitle: true
-        }
-      );
+
+          return {
+            ...currentSnapshot,
+            nodes: [
+              ...topology.nodes,
+              {
+                id: nextNodeId,
+                parentId: parentNodeId,
+                title: toBranchTitle(trimmed),
+                createdAt: new Date().toISOString(),
+                position: nextBranchPosition(topology.nodes, parentNodeId)
+              }
+            ],
+            messagesByNode: {
+              ...topology.messagesByNode,
+              [nextNodeId]: [userMessage]
+            },
+            activeNodeId: nextNodeId
+          };
+        });
+      } else {
+        const parentNodeId =
+          pendingBranchDraft?.sourceNodeId && snapshot.nodes.some((node) => node.id === pendingBranchDraft.sourceNodeId)
+            ? pendingBranchDraft.sourceNodeId
+            : snapshot.activeNodeId;
+
+        commitSnapshot(conversationId, (currentSnapshot) => {
+          const userMessage: ChatMessage = {
+            id: userMessageId,
+            nodeId: nextNodeId,
+            role: "user",
+            content: trimmed,
+            quotedText: pendingBranchDraft?.quoteText,
+            quotePreview: pendingBranchDraft?.quotePreview,
+            quotedMessageId: pendingBranchDraft?.sourceMessageId,
+            quotedNodeId: pendingBranchDraft?.sourceNodeId
+          };
+
+          return {
+            ...currentSnapshot,
+            nodes: [
+              ...currentSnapshot.nodes,
+              {
+                id: nextNodeId,
+                parentId: parentNodeId,
+                title: toBranchTitle(trimmed),
+                createdAt: new Date().toISOString(),
+                position: nextBranchPosition(currentSnapshot.nodes, parentNodeId)
+              }
+            ],
+            messagesByNode: {
+              ...currentSnapshot.messagesByNode,
+              [nextNodeId]: [userMessage]
+            },
+            activeNodeId: nextNodeId
+          };
+        });
+      }
+
+      setPendingBranchDraft(null);
+      setFocusedMessageId(null);
 
       void streamAssistantReply({
         conversationId,
-        nodeId,
-        prompt: trimmed,
+        nodeId: nextNodeId,
+        prompt,
         replyToMessageId: userMessageId,
         retryIndex: 1
       });
     },
-    [activeConversation, commitSnapshot, streamAssistantReply]
+    [activeConversation, commitSnapshot, pendingBranchDraft, streamAssistantReply]
   );
 
   const handleRetryMessage = useCallback(
@@ -530,81 +773,6 @@ export default function HomePage() {
     [activeConversation, streamAssistantReply]
   );
 
-  const handleCreateBranch = useCallback(
-    (payload: BranchCreatePayload) => {
-      if (!activeConversation) {
-        return;
-      }
-
-      const sourceMessages = activeConversation.snapshot.messagesByNode[payload.sourceNodeId] ?? [];
-      if (sourceMessages.length === 0) {
-        return;
-      }
-
-      const sourceMessage = sourceMessages.find((message) => message.id === payload.sourceMessageId);
-      const titleSource =
-        payload.mode === "selection" ? payload.selectedText : sourceMessage?.content ?? "新分支";
-
-      const branchNodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
-      const clonedMessages = cloneConversationContext(
-        sourceMessages,
-        payload.sourceMessageId,
-        branchNodeId
-      );
-
-      let branchPromptMessageId: string | null = null;
-      let branchPrompt = "";
-      const nextMessages =
-        payload.mode === "selection"
-          ? (() => {
-              branchPromptMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
-              branchPrompt = `请重点围绕以下选中文案继续深入，并将其作为本次回答的最高优先级上下文：\n\n「${payload.selectedText}」`;
-              return [
-                ...clonedMessages,
-                {
-                  id: branchPromptMessageId,
-                  nodeId: branchNodeId,
-                  role: "user" as const,
-                  content: branchPrompt
-                }
-              ];
-            })()
-          : clonedMessages;
-
-      commitSnapshot(activeConversation.id, (snapshot) => ({
-        ...snapshot,
-        nodes: [
-          ...snapshot.nodes,
-          {
-            id: branchNodeId,
-            parentId: payload.sourceNodeId,
-            title: toBranchTitle(titleSource),
-            createdAt: new Date().toISOString(),
-            position: nextBranchPosition(snapshot.nodes, payload.sourceNodeId)
-          }
-        ],
-        messagesByNode: {
-          ...snapshot.messagesByNode,
-          [branchNodeId]: nextMessages
-        },
-        activeNodeId: branchNodeId
-      }));
-
-      setFocusedMessageId(null);
-
-      if (payload.mode === "selection" && branchPromptMessageId) {
-        void streamAssistantReply({
-          conversationId: activeConversation.id,
-          nodeId: branchNodeId,
-          prompt: branchPrompt,
-          replyToMessageId: branchPromptMessageId,
-          retryIndex: 1
-        });
-      }
-    },
-    [activeConversation, commitSnapshot, streamAssistantReply]
-  );
-
   const handleCreateNote = useCallback(
     (payload: NoteCreatePayload) => {
       if (!activeConversation) {
@@ -637,17 +805,20 @@ export default function HomePage() {
     [activeConversation]
   );
 
-  const handleSelectNode = useCallback((nodeId: string) => {
-    if (!activeConversation) {
-      return;
-    }
+  const handleSelectNode = useCallback(
+    (nodeId: string) => {
+      if (!activeConversation) {
+        return;
+      }
 
-    commitSnapshot(activeConversation.id, (snapshot) => ({
-      ...snapshot,
-      activeNodeId: nodeId
-    }));
-    setFocusedMessageId(null);
-  }, [activeConversation, commitSnapshot]);
+      commitSnapshot(activeConversation.id, (snapshot) => ({
+        ...snapshot,
+        activeNodeId: nodeId
+      }));
+      setFocusedMessageId(null);
+    },
+    [activeConversation, commitSnapshot]
+  );
 
   const handleMoveNode = useCallback(
     (nodeId: string, position: { x: number; y: number }) => {
@@ -669,11 +840,13 @@ export default function HomePage() {
     setActiveConversationId(nextConversation.id);
     setActiveSection("ask-ai");
     setFocusedMessageId(null);
+    setPendingBranchDraft(null);
   }, []);
 
   const handleSelectConversation = useCallback((conversationId: string) => {
     setActiveConversationId(conversationId);
     setFocusedMessageId(null);
+    setPendingBranchDraft(null);
     setActiveSection("ask-ai");
   }, []);
 
@@ -690,7 +863,7 @@ export default function HomePage() {
           minute: "2-digit"
         }),
         messageCount: Object.values(conversation.snapshot.messagesByNode).flat().length,
-        hasBranches: conversation.snapshot.nodes.some((node) => node.parentId !== null)
+        hasBranches: hasBranchNodes(conversation.snapshot)
       }));
   }, [conversations]);
 
@@ -715,12 +888,11 @@ export default function HomePage() {
   }, [conversations, notes]);
 
   const activeSnapshot = activeConversation?.snapshot ?? null;
-  const activeMessages = activeSnapshot
-    ? activeSnapshot.messagesByNode[activeSnapshot.activeNodeId] ?? []
+  const linearRootNodeId = activeSnapshot ? resolveLinearRootNode(activeSnapshot) : null;
+  const activeMessages = activeSnapshot && linearRootNodeId
+    ? activeSnapshot.messagesByNode[linearRootNodeId] ?? []
     : [];
-  const hasBranches = activeSnapshot
-    ? activeSnapshot.nodes.some((node) => node.parentId !== null)
-    : false;
+  const branched = activeSnapshot ? hasBranchNodes(activeSnapshot) : false;
 
   const topBarTitle = useMemo(() => {
     if (activeSection === "notes") {
@@ -777,31 +949,30 @@ export default function HomePage() {
           ) : null}
 
           {activeSection === "ask-ai" && activeSnapshot ? (
-            hasBranches ? (
-              <div className="grid h-full min-h-0 grid-rows-[minmax(260px,44%)_1fr]">
+            branched ? (
+              <div className="grid h-full min-h-0 grid-rows-[1fr_auto]">
                 <GraphPane
                   nodes={activeSnapshot.nodes}
                   messagesByNode={activeSnapshot.messagesByNode}
                   activeNodeId={activeSnapshot.activeNodeId}
                   onSelectNode={handleSelectNode}
                   onMoveNode={handleMoveNode}
+                  onCreateBranch={handlePrepareBranch}
+                  onCreateNote={handleCreateNote}
                 />
-                <div className="min-h-0 border-t bg-background">
-                  <ChatPane
-                    messages={activeMessages}
-                    focusedMessageId={focusedMessageId}
-                    onCreateBranch={handleCreateBranch}
-                    onCreateNote={handleCreateNote}
-                    onRetryMessage={handleRetryMessage}
-                    onSendMessage={handleSendMessage}
-                  />
-                </div>
+                <ChatComposer
+                  quotePreview={pendingBranchDraft?.quotePreview ?? null}
+                  onClearQuote={() => setPendingBranchDraft(null)}
+                  onSendMessage={handleSendMessage}
+                />
               </div>
             ) : (
               <ChatPane
                 messages={activeMessages}
                 focusedMessageId={focusedMessageId}
-                onCreateBranch={handleCreateBranch}
+                quotePreview={pendingBranchDraft?.quotePreview ?? null}
+                onClearQuote={() => setPendingBranchDraft(null)}
+                onCreateBranch={handlePrepareBranch}
                 onCreateNote={handleCreateNote}
                 onRetryMessage={handleRetryMessage}
                 onSendMessage={handleSendMessage}
