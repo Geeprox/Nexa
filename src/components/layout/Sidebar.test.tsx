@@ -8,13 +8,22 @@ afterEach(() => {
 
 describe("Sidebar", () => {
   it("renders sidebar-10 aligned sections and settings entry", () => {
-    render(<Sidebar activeSection="conversations" />);
+    render(
+      <Sidebar
+        activeSection="conversations"
+        conversations={[
+          { id: "conv-a", title: "Conversation A" },
+          { id: "conv-b", title: "Conversation B" }
+        ]}
+      />
+    );
 
     expect(screen.queryByText("Nexa")).not.toBeInTheDocument();
     expect(screen.getByText("Ask AI")).toBeInTheDocument();
     expect(screen.getByText("全部对话")).toBeInTheDocument();
     expect(screen.getByText("全部笔记")).toBeInTheDocument();
-    expect(screen.getByText("Favorites")).toBeInTheDocument();
+    expect(screen.getByText("Conversations")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Conversation A" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
   });
 
@@ -27,5 +36,23 @@ describe("Sidebar", () => {
 
     expect(onSectionChange).toHaveBeenNthCalledWith(1, "ask-ai");
     expect(onSectionChange).toHaveBeenNthCalledWith(2, "notes");
+  });
+
+  it("notifies conversation selection", () => {
+    const onSelectConversation = vi.fn();
+    render(
+      <Sidebar
+        activeSection="ask-ai"
+        activeConversationId="conv-a"
+        conversations={[
+          { id: "conv-a", title: "Conversation A" },
+          { id: "conv-b", title: "Conversation B" }
+        ]}
+        onSelectConversation={onSelectConversation}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Conversation B" }));
+    expect(onSelectConversation).toHaveBeenCalledWith("conv-b");
   });
 });

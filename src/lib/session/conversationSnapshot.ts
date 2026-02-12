@@ -1,3 +1,5 @@
+import { logError, logWarn } from "@/lib/logging/logger";
+
 export const CONVERSATION_SNAPSHOT_KEY = "nexa.v1.conversation.snapshot";
 
 export interface PersistedMessage {
@@ -182,8 +184,15 @@ export function loadConversationSnapshot(storage?: StorageLike): ConversationSna
       return null;
     }
 
-    return normalizeConversationSnapshot(JSON.parse(raw));
-  } catch {
+    const normalized = normalizeConversationSnapshot(JSON.parse(raw));
+    if (!normalized) {
+      logWarn("conversationSnapshot", "Invalid snapshot schema detected.");
+    }
+    return normalized;
+  } catch (error) {
+    logError("conversationSnapshot", error, {
+      message: "Failed to parse legacy conversation snapshot."
+    });
     return null;
   }
 }
@@ -205,7 +214,25 @@ export function saveConversationSnapshot(
   try {
     target.setItem(CONVERSATION_SNAPSHOT_KEY, JSON.stringify(normalized));
     return true;
-  } catch {
+  } catch (error) {
+    logError("conversationSnapshot", error, {
+      message: "Failed to persist legacy conversation snapshot."
+    });
     return false;
+  }
+}
+
+export function clearConversationSnapshot(storage?: StorageLike) {
+  const target = toStorage(storage);
+  if (!target) {
+    return;
+  }
+
+  try {
+    target.removeItem(CONVERSATION_SNAPSHOT_KEY);
+  } catch (error) {
+    logError("conversationSnapshot", error, {
+      message: "Failed to clear legacy conversation snapshot."
+    });
   }
 }

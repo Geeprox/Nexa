@@ -18,6 +18,16 @@ const nodes: GraphNode[] = [
     position: { x: 280, y: 120 }
   }
 ];
+const messagesByNode = {
+  root: [
+    { role: "user" as const, content: "如何开始比较？" },
+    { role: "assistant" as const, content: "先定义比较维度并建立模板。" }
+  ],
+  "node-1": [
+    { role: "user" as const, content: "给我分支中的执行步骤" },
+    { role: "assistant" as const, content: "可以从样本集、指标、复盘三个阶段推进。" }
+  ]
+};
 
 afterEach(() => {
   cleanup();
@@ -31,14 +41,16 @@ describe("GraphPane", () => {
     render(
       <GraphPane
         nodes={nodes}
+        messagesByNode={messagesByNode}
         activeNodeId="root"
         onSelectNode={onSelectNode}
         onMoveNode={onMoveNode}
       />
     );
 
-    expect(screen.getByText("对话图谱")).toBeInTheDocument();
     expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
+    expect(screen.getAllByText(/Q:/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/A:/).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByTestId("graph-node-node-1")[0]);
     expect(onSelectNode).toHaveBeenCalledWith("node-1");
@@ -48,6 +60,7 @@ describe("GraphPane", () => {
     render(
       <GraphPane
         nodes={nodes}
+        messagesByNode={messagesByNode}
         activeNodeId="root"
         onSelectNode={vi.fn()}
         onMoveNode={vi.fn()}
@@ -64,6 +77,7 @@ describe("GraphPane", () => {
     render(
       <GraphPane
         nodes={nodes}
+        messagesByNode={messagesByNode}
         activeNodeId="root"
         onSelectNode={onSelectNode}
         onMoveNode={vi.fn()}
@@ -80,6 +94,7 @@ describe("GraphPane", () => {
     render(
       <GraphPane
         nodes={nodes}
+        messagesByNode={messagesByNode}
         activeNodeId="node-1"
         onSelectNode={onSelectNode}
         onMoveNode={vi.fn()}

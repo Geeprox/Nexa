@@ -5,53 +5,58 @@ import {
   BranchCreatePayload,
   ChatMessage,
   ChatPane,
+  NoteCreatePayload,
   RetryMessagePayload
 } from "@/components/chat/ChatPane";
+import {
+  ConversationListPane,
+  ConversationSummary
+} from "@/components/conversation/ConversationListPane";
 import { GraphNode, GraphPane } from "@/components/graph/GraphPane";
 import { Sidebar, SidebarSection } from "@/components/layout/Sidebar";
+import { NotesPane } from "@/components/notes/NotesPane";
+import { SettingsModal } from "@/components/settings/SettingsModal";
 import { TopBar } from "@/components/layout/TopBar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { pickRandomMockReply } from "@/lib/mock/chatResponses";
+import { streamMockProviderResponse } from "@/lib/llm/mockProvider";
+import { logError, logInfo } from "@/lib/logging/logger";
+import { INITIAL_CHAT_TURNS } from "@/lib/mock/chatResponses";
+import { ConversationSnapshot } from "@/lib/session/conversationSnapshot";
 import {
-  ConversationSnapshot,
-  loadConversationSnapshot,
-  saveConversationSnapshot
-} from "@/lib/session/conversationSnapshot";
+  DEFAULT_MODEL_PROVIDER_SETTINGS,
+  WorkspaceConversation,
+  WorkspaceNote,
+  WorkspaceState,
+  loadWorkspaceState,
+  saveWorkspaceState
+} from "@/lib/session/workspaceState";
 
-const initialMessagesByNode: Record<string, ChatMessage[]> = {
-  root: [
-    {
-      id: "m-user-1",
+function createInitialMessagesByNode(): Record<string, ChatMessage[]> {
+  const rootMessages: ChatMessage[] = [];
+  for (let index = 0; index < INITIAL_CHAT_TURNS.length; index += 1) {
+    const turn = INITIAL_CHAT_TURNS[index];
+    const userMessageId = `m-user-${index + 1}`;
+    rootMessages.push({
+      id: userMessageId,
       nodeId: "root",
       role: "user",
-      content: "如何用 LLM 做文献对比？"
-    },
-    {
-      id: "m-assistant-1",
+      content: turn.user
+    });
+
+    rootMessages.push({
+      id: `m-assistant-${index + 1}`,
       nodeId: "root",
       role: "assistant",
-      content:
-        "可以先把文献对比拆成固定字段：研究问题、数据来源、方法路线、实验设置、核心结论和局限。随后让模型按统一模板逐篇抽取，再用表格聚合。关键不在于一次回答很长，而在于字段定义稳定，这样你才能持续追加新文献并做横向比较。",
-      replyToMessageId: "m-user-1",
+      content: turn.assistant,
+      replyToMessageId: userMessageId,
       retryIndex: 1
-    },
-    {
-      id: "m-user-2",
-      nodeId: "root",
-      role: "user",
-      content: "那如果不同论文指标口径不一致怎么办？"
-    },
-    {
-      id: "m-assistant-2",
-      nodeId: "root",
-      role: "assistant",
-      content:
-        "先做指标归一化字典，把同义指标映射到统一维度，比如把不同命名的准确率、召回率映射到同一评价层。对无法直接映射的指标，要求模型输出“原指标 + 解释 + 可比性等级”。最终你会得到一个既能自动聚合又保留差异上下文的比较矩阵，避免把不可比数据硬合并。",
-      replyToMessageId: "m-user-2",
-      retryIndex: 1
-    }
-  ]
-};
+    });
+  }
+
+  return {
+    root: rootMessages
+  };
+}
 
 const initialNodes: GraphNode[] = [
   {
@@ -65,6 +70,84 @@ const initialNodes: GraphNode[] = [
     }
   }
 ];
+
+function createInitialSnapshot(): ConversationSnapshot {
+  return {
+    version: 1,
+    nodes: initialNodes,
+    messagesByNode: createInitialMessagesByNode(),
+    activeNodeId: "root",
+    conversationTags: [],
+    dismissedAutoTags: []
+  };
+}
+
+function deriveConversationTitleFromSnapshot(snapshot: ConversationSnapshot) {
+  const firstUserMessage = Object.values(snapshot.messagesByNode)
+    .flat()
+    .find((message) => message.role === "user")?.content;
+  if (!firstUserMessage) {
+    return "New chat";
+  }
+
+  const compact = firstUserMessage.trim().replace(/\s+/g, " ");
+  if (!compact) {
+    return "New chat";
+  }
+
+  return compact.length <= 24 ? compact : `${compact.slice(0, 24)}...`;
+}
+
+function createConversationRecord(snapshot: ConversationSnapshot): WorkspaceConversation {
+  const now = new Date().toISOString();
+  return {
+    id: `conv-${crypto.randomUUID().slice(0, 8)}`,
+    title: deriveConversationTitleFromSnapshot(snapshot),
+    createdAt: now,
+    updatedAt: now,
+    snapshot
+  };
+}
+
+function createEmptyConversationRecord(): WorkspaceConversation {
+  const snapshot: ConversationSnapshot = {
+    version: 1,
+    nodes: [
+      {
+        id: "root",
+        parentId: null,
+        title: "起点问题",
+        createdAt: new Date().toISOString(),
+        position: {
+          x: 40,
+          y: 140
+        }
+      }
+    ],
+    messagesByNode: {
+      root: []
+    },
+    activeNodeId: "root",
+    conversationTags: [],
+    dismissedAutoTags: []
+  };
+
+  return {
+    ...createConversationRecord(snapshot),
+    title: "New chat"
+  };
+}
+
+function createFallbackWorkspace(): WorkspaceState {
+  const conversation = createConversationRecord(createInitialSnapshot());
+  return {
+    version: 2,
+    conversations: [conversation],
+    activeConversationId: conversation.id,
+    notes: [],
+    modelProvider: DEFAULT_MODEL_PROVIDER_SETTINGS
+  };
+}
 
 function toBranchTitle(text: string) {
   const compact = text.replace(/\s+/g, " ").trim();
@@ -82,18 +165,9 @@ function nextBranchPosition(allNodes: GraphNode[], parentId: string) {
 
   const children = allNodes.filter((node) => node.parentId === parentId);
   return {
-    x: parent.position.x + 280,
-    y: parent.position.y + children.length * 140
+    x: parent.position.x + 300,
+    y: parent.position.y + children.length * 168
   };
-}
-
-function deriveConversationTitle(messages: ChatMessage[]) {
-  const firstUserMessage = messages.find((message) => message.role === "user")?.content ?? "未命名会话";
-  const compact = firstUserMessage.replace(/\s+/g, " ").trim();
-  if (compact.length <= 18) {
-    return compact;
-  }
-  return `${compact.slice(0, 18)}...`;
 }
 
 function cloneConversationContext(
@@ -119,66 +193,139 @@ function cloneConversationContext(
 }
 
 export default function HomePage() {
-  const initialSnapshot = useMemo<ConversationSnapshot>(() => {
-    return (
-      loadConversationSnapshot() ?? {
-        version: 1,
-        nodes: initialNodes,
-        messagesByNode: initialMessagesByNode,
-        activeNodeId: "root",
-        conversationTags: [],
-        dismissedAutoTags: []
-      }
-    );
+  const initialWorkspace = useMemo<WorkspaceState>(() => {
+    return loadWorkspaceState() ?? createFallbackWorkspace();
   }, []);
 
-  const [messagesByNode, setMessagesByNode] = useState(initialSnapshot.messagesByNode);
-  const [nodes, setNodes] = useState(initialSnapshot.nodes);
-  const [activeNodeId, setActiveNodeId] = useState(initialSnapshot.activeNodeId);
-  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState(initialWorkspace.conversations);
+  const [activeConversationId, setActiveConversationId] = useState(initialWorkspace.activeConversationId);
   const [activeSection, setActiveSection] = useState<SidebarSection>("ask-ai");
-  const streamTimersRef = useRef<Map<string, number>>(new Map());
+  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
+  const [notes, setNotes] = useState(initialWorkspace.notes);
+  const [modelProvider, setModelProvider] = useState(initialWorkspace.modelProvider);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  const clearStreamingTimer = useCallback((messageId: string) => {
-    const timerId = streamTimersRef.current.get(messageId);
-    if (timerId !== undefined) {
-      window.clearInterval(timerId);
-      streamTimersRef.current.delete(messageId);
-    }
-  }, []);
+  const streamControllersRef = useRef<Map<string, AbortController>>(new Map());
 
   useEffect(() => {
-    const activeTimers = streamTimersRef.current;
+    const handleWindowError = (event: ErrorEvent) => {
+      logError("window.error", event.error ?? event.message, {
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno
+      });
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      logError("window.unhandledrejection", event.reason);
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
     return () => {
-      for (const timerId of activeTimers.values()) {
-        window.clearInterval(timerId);
-      }
-      activeTimers.clear();
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
     };
   }, []);
 
-  const startStreamingAssistantReply = useCallback(
-    ({
+  useEffect(() => {
+    const controllers = streamControllersRef.current;
+    return () => {
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, []);
+
+  const activeConversation = useMemo(() => {
+    return conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0] ?? null;
+  }, [activeConversationId, conversations]);
+
+  useEffect(() => {
+    if (!activeConversation && conversations[0]) {
+      setActiveConversationId(conversations[0].id);
+    }
+  }, [activeConversation, conversations]);
+
+  useEffect(() => {
+    if (!activeConversation) {
+      return;
+    }
+
+    const success = saveWorkspaceState({
+      version: 2,
+      conversations,
+      activeConversationId: activeConversation.id,
+      notes,
+      modelProvider
+    });
+
+    if (!success) {
+      logError("workspace", new Error("Failed to save workspace state"), {
+        activeConversationId: activeConversation.id
+      });
+    }
+  }, [activeConversation, conversations, modelProvider, notes]);
+
+  const commitSnapshot = useCallback(
+    (
+      conversationId: string,
+      updater: (snapshot: ConversationSnapshot) => ConversationSnapshot,
+      options?: {
+        refreshTitle?: boolean;
+      }
+    ) => {
+      setConversations((current) =>
+        current.map((conversation) => {
+          if (conversation.id !== conversationId) {
+            return conversation;
+          }
+
+          const nextSnapshot = updater(conversation.snapshot);
+          const nextTitle = options?.refreshTitle
+            ? deriveConversationTitleFromSnapshot(nextSnapshot)
+            : conversation.title;
+
+          return {
+            ...conversation,
+            title: nextTitle,
+            updatedAt: new Date().toISOString(),
+            snapshot: nextSnapshot
+          };
+        })
+      );
+    },
+    []
+  );
+
+  const streamAssistantReply = useCallback(
+    async ({
+      conversationId,
       nodeId,
       replyToMessageId,
-      content,
-      messageId,
       retryIndex,
-      insertAfterMessageId
+      insertAfterMessageId,
+      prompt,
+      previousReplies = []
     }: {
+      conversationId: string;
       nodeId: string;
       replyToMessageId: string;
-      content: string;
-      messageId: string;
       retryIndex: number;
       insertAfterMessageId?: string;
+      prompt: string;
+      previousReplies?: string[];
     }) => {
-      clearStreamingTimer(messageId);
+      const assistantMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+      const streamKey = `${conversationId}:${assistantMessageId}`;
+      const controller = new AbortController();
+      streamControllersRef.current.set(streamKey, controller);
 
-      setMessagesByNode((current) => {
-        const bucket = current[nodeId] ?? [];
-        const nextAssistantMessage: ChatMessage = {
-          id: messageId,
+      commitSnapshot(conversationId, (snapshot) => {
+        const bucket = snapshot.messagesByNode[nodeId] ?? [];
+        const nextMessage: ChatMessage = {
+          id: assistantMessageId,
           nodeId,
           role: "assistant",
           content: "",
@@ -187,110 +334,176 @@ export default function HomePage() {
           isStreaming: true
         };
 
-        if (!insertAfterMessageId) {
-          return {
-            ...current,
-            [nodeId]: [...bucket, nextAssistantMessage]
-          };
-        }
-
-        const anchorIndex = bucket.findIndex((message) => message.id === insertAfterMessageId);
-        if (anchorIndex < 0) {
-          return {
-            ...current,
-            [nodeId]: [...bucket, nextAssistantMessage]
-          };
-        }
+        const anchorIndex = insertAfterMessageId
+          ? bucket.findIndex((message) => message.id === insertAfterMessageId)
+          : -1;
+        const nextBucket =
+          anchorIndex >= 0
+            ? [...bucket.slice(0, anchorIndex + 1), nextMessage, ...bucket.slice(anchorIndex + 1)]
+            : [...bucket, nextMessage];
 
         return {
-          ...current,
-          [nodeId]: [
-            ...bucket.slice(0, anchorIndex + 1),
-            nextAssistantMessage,
-            ...bucket.slice(anchorIndex + 1)
-          ]
+          ...snapshot,
+          messagesByNode: {
+            ...snapshot.messagesByNode,
+            [nodeId]: nextBucket
+          }
         };
       });
 
-      let cursor = 0;
-      const intervalId = window.setInterval(() => {
-        const chunkSize = 16 + Math.floor(Math.random() * 10);
-        cursor = Math.min(content.length, cursor + chunkSize);
-        const nextContent = content.slice(0, cursor);
-        const finished = cursor >= content.length;
+      let content = "";
 
-        setMessagesByNode((current) => {
-          const bucket = current[nodeId] ?? [];
-          return {
-            ...current,
-            [nodeId]: bucket.map((message) => {
-              if (message.id !== messageId) {
-                return message;
+      try {
+        const stream = streamMockProviderResponse(
+          {
+            conversationId,
+            prompt,
+            previousReplies,
+            providerUrl: modelProvider.providerUrl,
+            apiKey: modelProvider.apiKey
+          },
+          {
+            signal: controller.signal
+          }
+        );
+
+        for await (const chunk of stream) {
+          if (chunk.done) {
+            continue;
+          }
+
+          content += chunk.delta;
+          commitSnapshot(conversationId, (snapshot) => {
+            const bucket = snapshot.messagesByNode[nodeId] ?? [];
+            return {
+              ...snapshot,
+              messagesByNode: {
+                ...snapshot.messagesByNode,
+                [nodeId]: bucket.map((message) =>
+                  message.id === assistantMessageId
+                    ? {
+                        ...message,
+                        content,
+                        isStreaming: true
+                      }
+                    : message
+                )
               }
-              return {
-                ...message,
-                content: nextContent,
-                isStreaming: !finished
-              };
-            })
+            };
+          });
+        }
+
+        commitSnapshot(conversationId, (snapshot) => {
+          const bucket = snapshot.messagesByNode[nodeId] ?? [];
+          return {
+            ...snapshot,
+            messagesByNode: {
+              ...snapshot.messagesByNode,
+              [nodeId]: bucket.map((message) =>
+                message.id === assistantMessageId
+                  ? {
+                      ...message,
+                      content,
+                      isStreaming: false
+                    }
+                  : message
+              )
+            }
           };
         });
-
-        if (finished) {
-          clearStreamingTimer(messageId);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          logError("mockProvider.stream", error, {
+            conversationId,
+            nodeId,
+            messageId: assistantMessageId
+          });
         }
-      }, 45);
 
-      streamTimersRef.current.set(messageId, intervalId);
+        commitSnapshot(conversationId, (snapshot) => {
+          const bucket = snapshot.messagesByNode[nodeId] ?? [];
+          return {
+            ...snapshot,
+            messagesByNode: {
+              ...snapshot.messagesByNode,
+              [nodeId]: bucket.map((message) =>
+                message.id === assistantMessageId
+                  ? {
+                      ...message,
+                      content:
+                        content ||
+                        "[Mock provider interrupted. Please retry.]",
+                      isStreaming: false
+                    }
+                  : message
+              )
+            }
+          };
+        });
+      } finally {
+        streamControllersRef.current.delete(streamKey);
+      }
     },
-    [clearStreamingTimer]
+    [commitSnapshot, modelProvider.apiKey, modelProvider.providerUrl]
   );
 
   const handleSendMessage = useCallback(
     (value: string) => {
       const trimmed = value.trim();
-      if (!trimmed) {
+      if (!trimmed || !activeConversation) {
         return;
       }
 
-      const nodeId = activeNodeId;
+      const conversationId = activeConversation.id;
+      const nodeId = activeConversation.snapshot.activeNodeId;
       const userMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
-      setMessagesByNode((current) => {
-        const bucket = current[nodeId] ?? [];
-        return {
-          ...current,
-          [nodeId]: [
-            ...bucket,
-            {
-              id: userMessageId,
-              nodeId,
-              role: "user",
-              content: trimmed
-            }
-          ]
-        };
-      });
 
-      const reply = pickRandomMockReply(trimmed);
-      const assistantMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
-      startStreamingAssistantReply({
+      commitSnapshot(
+        conversationId,
+        (snapshot) => {
+          const bucket = snapshot.messagesByNode[nodeId] ?? [];
+          return {
+            ...snapshot,
+            messagesByNode: {
+              ...snapshot.messagesByNode,
+              [nodeId]: [
+                ...bucket,
+                {
+                  id: userMessageId,
+                  nodeId,
+                  role: "user",
+                  content: trimmed
+                }
+              ]
+            }
+          };
+        },
+        {
+          refreshTitle: true
+        }
+      );
+
+      void streamAssistantReply({
+        conversationId,
         nodeId,
+        prompt: trimmed,
         replyToMessageId: userMessageId,
-        content: reply,
-        messageId: assistantMessageId,
         retryIndex: 1
       });
     },
-    [activeNodeId, startStreamingAssistantReply]
+    [activeConversation, commitSnapshot, streamAssistantReply]
   );
 
   const handleRetryMessage = useCallback(
     (payload: RetryMessagePayload) => {
-      const sourceMessages = messagesByNode[payload.sourceNodeId] ?? [];
+      if (!activeConversation) {
+        return;
+      }
+
+      const sourceMessages = activeConversation.snapshot.messagesByNode[payload.sourceNodeId] ?? [];
       const sourcePrompt = sourceMessages.find(
         (message) => message.id === payload.replyToMessageId && message.role === "user"
       );
-
       if (!sourcePrompt) {
         return;
       }
@@ -304,146 +517,306 @@ export default function HomePage() {
         .filter((item) => item.trim().length > 0);
 
       const retryIndex = previousReplyMessages.length + 1;
-      const reply = pickRandomMockReply(sourcePrompt.content, previousReplies);
-      const assistantMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
-
-      startStreamingAssistantReply({
+      void streamAssistantReply({
+        conversationId: activeConversation.id,
         nodeId: payload.sourceNodeId,
+        prompt: sourcePrompt.content,
         replyToMessageId: payload.replyToMessageId,
-        content: reply,
-        messageId: assistantMessageId,
         retryIndex,
-        insertAfterMessageId: previousReplyMessages.at(-1)?.id
+        insertAfterMessageId: previousReplyMessages.at(-1)?.id,
+        previousReplies
       });
     },
-    [messagesByNode, startStreamingAssistantReply]
+    [activeConversation, streamAssistantReply]
   );
 
   const handleCreateBranch = useCallback(
     (payload: BranchCreatePayload) => {
-      const sourceMessages = messagesByNode[payload.sourceNodeId] ?? [];
+      if (!activeConversation) {
+        return;
+      }
+
+      const sourceMessages = activeConversation.snapshot.messagesByNode[payload.sourceNodeId] ?? [];
       if (sourceMessages.length === 0) {
         return;
       }
 
-      const branchNodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
       const sourceMessage = sourceMessages.find((message) => message.id === payload.sourceMessageId);
-      const titleSource = payload.mode === "selection" ? payload.selectedText : sourceMessage?.content ?? "新分支";
+      const titleSource =
+        payload.mode === "selection" ? payload.selectedText : sourceMessage?.content ?? "新分支";
+
+      const branchNodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
       const clonedMessages = cloneConversationContext(
         sourceMessages,
         payload.sourceMessageId,
         branchNodeId
       );
 
+      let branchPromptMessageId: string | null = null;
+      let branchPrompt = "";
       const nextMessages =
         payload.mode === "selection"
-          ? [
-              ...clonedMessages,
-              {
-                id: `m-${crypto.randomUUID().slice(0, 8)}`,
-                nodeId: branchNodeId,
-                role: "user" as const,
-                content: `请重点围绕以下选中文案继续深入，并将其作为本次回答的最高优先级上下文：\n\n「${payload.selectedText}」`
-              }
-            ]
+          ? (() => {
+              branchPromptMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+              branchPrompt = `请重点围绕以下选中文案继续深入，并将其作为本次回答的最高优先级上下文：\n\n「${payload.selectedText}」`;
+              return [
+                ...clonedMessages,
+                {
+                  id: branchPromptMessageId,
+                  nodeId: branchNodeId,
+                  role: "user" as const,
+                  content: branchPrompt
+                }
+              ];
+            })()
           : clonedMessages;
 
-      setNodes((current) => [
-        ...current,
-        {
-          id: branchNodeId,
-          parentId: payload.sourceNodeId,
-          title: toBranchTitle(titleSource),
-          createdAt: new Date().toISOString(),
-          position: nextBranchPosition(current, payload.sourceNodeId)
-        }
-      ]);
-
-      setMessagesByNode((current) => ({
-        ...current,
-        [branchNodeId]: nextMessages
+      commitSnapshot(activeConversation.id, (snapshot) => ({
+        ...snapshot,
+        nodes: [
+          ...snapshot.nodes,
+          {
+            id: branchNodeId,
+            parentId: payload.sourceNodeId,
+            title: toBranchTitle(titleSource),
+            createdAt: new Date().toISOString(),
+            position: nextBranchPosition(snapshot.nodes, payload.sourceNodeId)
+          }
+        ],
+        messagesByNode: {
+          ...snapshot.messagesByNode,
+          [branchNodeId]: nextMessages
+        },
+        activeNodeId: branchNodeId
       }));
 
       setFocusedMessageId(null);
-      setActiveNodeId(branchNodeId);
+
+      if (payload.mode === "selection" && branchPromptMessageId) {
+        void streamAssistantReply({
+          conversationId: activeConversation.id,
+          nodeId: branchNodeId,
+          prompt: branchPrompt,
+          replyToMessageId: branchPromptMessageId,
+          retryIndex: 1
+        });
+      }
     },
-    [messagesByNode]
+    [activeConversation, commitSnapshot, streamAssistantReply]
+  );
+
+  const handleCreateNote = useCallback(
+    (payload: NoteCreatePayload) => {
+      if (!activeConversation) {
+        return;
+      }
+
+      const compact = payload.content.trim().replace(/\s+/g, " ");
+      if (!compact) {
+        return;
+      }
+
+      const title = compact.length <= 32 ? compact : `${compact.slice(0, 32)}...`;
+      const note: WorkspaceNote = {
+        id: `note-${crypto.randomUUID().slice(0, 8)}`,
+        title,
+        content: payload.content,
+        sourceConversationId: activeConversation.id,
+        sourceNodeId: payload.sourceNodeId,
+        sourceMessageId: payload.sourceMessageId,
+        createdAt: new Date().toISOString()
+      };
+
+      setNotes((current) => [note, ...current]);
+      logInfo("note", "Note captured from chat response.", {
+        conversationId: activeConversation.id,
+        sourceMessageId: payload.sourceMessageId,
+        mode: payload.mode
+      });
+    },
+    [activeConversation]
   );
 
   const handleSelectNode = useCallback((nodeId: string) => {
+    if (!activeConversation) {
+      return;
+    }
+
+    commitSnapshot(activeConversation.id, (snapshot) => ({
+      ...snapshot,
+      activeNodeId: nodeId
+    }));
     setFocusedMessageId(null);
-    setActiveNodeId(nodeId);
+  }, [activeConversation, commitSnapshot]);
+
+  const handleMoveNode = useCallback(
+    (nodeId: string, position: { x: number; y: number }) => {
+      if (!activeConversation) {
+        return;
+      }
+
+      commitSnapshot(activeConversation.id, (snapshot) => ({
+        ...snapshot,
+        nodes: snapshot.nodes.map((node) => (node.id === nodeId ? { ...node, position } : node))
+      }));
+    },
+    [activeConversation, commitSnapshot]
+  );
+
+  const handleCreateConversation = useCallback(() => {
+    const nextConversation = createEmptyConversationRecord();
+    setConversations((current) => [nextConversation, ...current]);
+    setActiveConversationId(nextConversation.id);
+    setActiveSection("ask-ai");
+    setFocusedMessageId(null);
   }, []);
 
-  const handleMoveNode = useCallback((nodeId: string, position: { x: number; y: number }) => {
-    setNodes((current) =>
-      current.map((node) => (node.id === nodeId ? { ...node, position } : node))
+  const handleSelectConversation = useCallback((conversationId: string) => {
+    setActiveConversationId(conversationId);
+    setFocusedMessageId(null);
+    setActiveSection("ask-ai");
+  }, []);
+
+  const conversationSummaries = useMemo<ConversationSummary[]>(() => {
+    return [...conversations]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        updatedAt: new Date(conversation.updatedAt).toLocaleString("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }),
+        messageCount: Object.values(conversation.snapshot.messagesByNode).flat().length,
+        hasBranches: conversation.snapshot.nodes.some((node) => node.parentId !== null)
+      }));
+  }, [conversations]);
+
+  const notesForView = useMemo(() => {
+    const conversationTitleMap = new Map(
+      conversations.map((conversation) => [conversation.id, conversation.title])
     );
-  }, []);
 
-  useEffect(() => {
-    if (nodes.length === 0) {
-      return;
-    }
+    return notes.map((note) => ({
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      sourceConversationTitle:
+        conversationTitleMap.get(note.sourceConversationId) ?? "Unknown conversation",
+      createdAt: new Date(note.createdAt).toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      })
+    }));
+  }, [conversations, notes]);
 
-    if (!nodes.some((node) => node.id === activeNodeId)) {
-      setActiveNodeId(nodes[0].id);
-      return;
-    }
-
-    saveConversationSnapshot({
-      version: 1,
-      nodes,
-      messagesByNode,
-      activeNodeId,
-      conversationTags: [],
-      dismissedAutoTags: []
-    });
-  }, [activeNodeId, messagesByNode, nodes]);
-
-  const activeNode = nodes.find((node) => node.id === activeNodeId);
-  const activeMessages = useMemo(() => messagesByNode[activeNodeId] ?? [], [messagesByNode, activeNodeId]);
-  const hasBranches = nodes.some((node) => node.parentId !== null);
-  const conversationTitle = useMemo(() => deriveConversationTitle(activeMessages), [activeMessages]);
+  const activeSnapshot = activeConversation?.snapshot ?? null;
+  const activeMessages = activeSnapshot
+    ? activeSnapshot.messagesByNode[activeSnapshot.activeNodeId] ?? []
+    : [];
+  const hasBranches = activeSnapshot
+    ? activeSnapshot.nodes.some((node) => node.parentId !== null)
+    : false;
 
   const topBarTitle = useMemo(() => {
     if (activeSection === "notes") {
       return "全部笔记";
     }
 
+    if (activeSection === "conversations") {
+      return "全部对话";
+    }
+
     if (activeSection === "search") {
       return "搜索";
     }
 
-    return conversationTitle;
-  }, [activeSection, conversationTitle]);
+    return activeConversation?.title ?? "New chat";
+  }, [activeConversation?.title, activeSection]);
 
   return (
     <SidebarProvider>
-      <Sidebar activeSection={activeSection} onSectionChange={setActiveSection} />
+      <Sidebar
+        activeSection={activeSection}
+        activeConversationId={activeConversation?.id}
+        conversations={conversationSummaries.map((item) => ({
+          id: item.id,
+          title: item.title
+        }))}
+        onSectionChange={setActiveSection}
+        onSelectConversation={handleSelectConversation}
+        onCreateConversation={handleCreateConversation}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+      />
 
       <SidebarInset className="min-h-svh">
         <TopBar title={topBarTitle} />
+
         <div className="min-h-0 flex-1 bg-muted/40">
-          {hasBranches ? (
-            <GraphPane
-              nodes={nodes}
-              activeNodeId={activeNodeId}
-              onSelectNode={handleSelectNode}
-              onMoveNode={handleMoveNode}
+          {activeSection === "conversations" ? (
+            <ConversationListPane
+              conversations={conversationSummaries}
+              activeConversationId={activeConversation?.id ?? ""}
+              onSelectConversation={handleSelectConversation}
+              onCreateConversation={handleCreateConversation}
             />
-          ) : (
-            <ChatPane
-              activeNodeTitle={activeNode?.title ?? "未命名分支"}
-              messages={activeMessages}
-              focusedMessageId={focusedMessageId}
-              onCreateBranch={handleCreateBranch}
-              onRetryMessage={handleRetryMessage}
-              onSendMessage={handleSendMessage}
-            />
-          )}
+          ) : null}
+
+          {activeSection === "notes" ? <NotesPane notes={notesForView} /> : null}
+
+          {activeSection === "search" ? (
+            <div className="flex h-full items-center justify-center px-6">
+              <div className="rounded-xl border border-dashed bg-card/70 px-4 py-8 text-sm text-muted-foreground">
+                搜索视图将在后续版本完善，当前可通过“全部对话/全部笔记”浏览内容。
+              </div>
+            </div>
+          ) : null}
+
+          {activeSection === "ask-ai" && activeSnapshot ? (
+            hasBranches ? (
+              <div className="grid h-full min-h-0 grid-rows-[minmax(260px,44%)_1fr]">
+                <GraphPane
+                  nodes={activeSnapshot.nodes}
+                  messagesByNode={activeSnapshot.messagesByNode}
+                  activeNodeId={activeSnapshot.activeNodeId}
+                  onSelectNode={handleSelectNode}
+                  onMoveNode={handleMoveNode}
+                />
+                <div className="min-h-0 border-t bg-background">
+                  <ChatPane
+                    messages={activeMessages}
+                    focusedMessageId={focusedMessageId}
+                    onCreateBranch={handleCreateBranch}
+                    onCreateNote={handleCreateNote}
+                    onRetryMessage={handleRetryMessage}
+                    onSendMessage={handleSendMessage}
+                  />
+                </div>
+              </div>
+            ) : (
+              <ChatPane
+                messages={activeMessages}
+                focusedMessageId={focusedMessageId}
+                onCreateBranch={handleCreateBranch}
+                onCreateNote={handleCreateNote}
+                onRetryMessage={handleRetryMessage}
+                onSendMessage={handleSendMessage}
+              />
+            )
+          ) : null}
         </div>
       </SidebarInset>
+
+      <SettingsModal
+        open={isSettingsOpen}
+        settings={modelProvider}
+        onOpenChange={setIsSettingsOpen}
+        onSave={setModelProvider}
+      />
     </SidebarProvider>
   );
 }

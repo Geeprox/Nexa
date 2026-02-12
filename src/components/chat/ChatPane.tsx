@@ -1,7 +1,28 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Copy,
+  GitBranchPlus,
+  ImagePlus,
+  Lightbulb,
+  Mic,
+  MoreHorizontal,
+  NotebookPen,
+  Paperclip,
+  Plus,
+  RotateCcw,
+  Share2,
+  ShoppingBag,
+  Telescope
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { logError } from "@/lib/logging/logger";
 import { cn } from "@/lib/utils";
 
 export interface ChatMessage {
@@ -33,6 +54,13 @@ export interface RetryMessagePayload {
   replyToMessageId: string;
 }
 
+export interface NoteCreatePayload {
+  mode: "message" | "selection";
+  sourceMessageId: string;
+  sourceNodeId: string;
+  content: string;
+}
+
 interface BranchActionState {
   x: number;
   y: number;
@@ -42,10 +70,10 @@ interface BranchActionState {
 }
 
 interface ChatPaneProps {
-  activeNodeTitle: string;
   messages: ChatMessage[];
   focusedMessageId?: string | null;
   onCreateBranch: (payload: BranchCreatePayload) => void;
+  onCreateNote: (payload: NoteCreatePayload) => void;
   onRetryMessage: (payload: RetryMessagePayload) => void;
   onSendMessage: (value: string) => void;
 }
@@ -63,22 +91,75 @@ interface AssistantGroupBlock {
 
 type RenderBlock = MessageBlock | AssistantGroupBlock;
 
+const toolActions = [
+  { label: "添加照片和文件", icon: Paperclip, shortcut: "⌘U", emphasized: true },
+  { label: "创建图片", icon: ImagePlus },
+  { label: "思考", icon: Lightbulb },
+  { label: "深度研究", icon: Telescope },
+  { label: "智能购物", icon: ShoppingBag },
+  { label: "更多", icon: MoreHorizontal }
+] as const;
+
 export function ChatPane({
-  activeNodeTitle,
   messages,
   focusedMessageId,
   onCreateBranch,
+  onCreateNote,
   onRetryMessage,
   onSendMessage
 }: ChatPaneProps) {
   const [branchAction, setBranchAction] = useState<BranchActionState | null>(null);
   const [draft, setDraft] = useState("");
+  const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [activeRetryByGroup, setActiveRetryByGroup] = useState<Record<string, number>>({});
   const previousGroupCountsRef = useRef<Record<string, number>>({});
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
 
   const hideBranchAction = useCallback(() => {
     setBranchAction(null);
+  }, []);
+
+  const findAssistantMessageElement = useCallback((selection: Selection, range: Range) => {
+    const selector = "[data-message-role='assistant'][data-message-id][data-node-id]";
+    const resolveFromNode = (node: Node | null) => {
+      if (!node) {
+        return null;
+      }
+
+      const element = node instanceof Element ? node : node.parentElement;
+      return element?.closest<HTMLElement>(selector) ?? null;
+    };
+
+    const directCandidates = [
+      resolveFromNode(range.startContainer),
+      resolveFromNode(range.endContainer),
+      resolveFromNode(range.commonAncestorContainer),
+      resolveFromNode(selection.anchorNode),
+      resolveFromNode(selection.focusNode)
+    ];
+
+    for (const candidate of directCandidates) {
+      if (candidate && scrollAreaRef.current?.contains(candidate)) {
+        return candidate;
+      }
+    }
+
+    if (!scrollAreaRef.current) {
+      return null;
+    }
+
+    const assistantMessageElements = scrollAreaRef.current.querySelectorAll<HTMLElement>(selector);
+    for (const messageElement of assistantMessageElements) {
+      try {
+        if (range.intersectsNode(messageElement)) {
+          return messageElement;
+        }
+      } catch {
+        // Range may become detached during rapid DOM updates.
+      }
+    }
+
+    return null;
   }, []);
 
   const renderBlocks = useMemo<RenderBlock[]>(() => {
@@ -144,9 +225,9 @@ export function ChatPane({
     });
   }, [renderBlocks]);
 
-  const handleSelection = useCallback(() => {
+  const updateBranchActionFromSelection = useCallback(() => {
     const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) {
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
       hideBranchAction();
       return;
     }
@@ -157,16 +238,8 @@ export function ChatPane({
       return;
     }
 
-    const anchorNode = selection.anchorNode;
-    if (!anchorNode) {
-      hideBranchAction();
-      return;
-    }
-
-    const anchorElement = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement;
-    const messageElement = anchorElement?.closest<HTMLElement>(
-      "[data-message-role='assistant'][data-message-id][data-node-id]"
-    );
+    const range = selection.getRangeAt(0);
+    const messageElement = findAssistantMessageElement(selection, range);
 
     if (!messageElement || !scrollAreaRef.current?.contains(messageElement)) {
       hideBranchAction();
@@ -180,17 +253,19 @@ export function ChatPane({
       return;
     }
 
-    const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
+    const fallbackRect = messageElement.getBoundingClientRect();
+    const left = rect.width > 0 ? rect.left + rect.width / 2 : fallbackRect.left + Math.min(120, fallbackRect.width / 2);
+    const top = rect.top > 0 ? rect.top : fallbackRect.top;
 
     setBranchAction({
-      x: rect.left + rect.width / 2,
-      y: Math.max(12, rect.top - 12),
+      x: left,
+      y: Math.max(14, top - 10),
       sourceMessageId,
       sourceNodeId,
       selectedText
     });
-  }, [hideBranchAction]);
+  }, [findAssistantMessageElement, hideBranchAction]);
 
   const handleBranchFromSelection = useCallback(() => {
     if (!branchAction) {
@@ -207,6 +282,33 @@ export function ChatPane({
     window.getSelection()?.removeAllRanges();
     hideBranchAction();
   }, [branchAction, hideBranchAction, onCreateBranch]);
+
+  const handleNoteFromSelection = useCallback(() => {
+    if (!branchAction) {
+      return;
+    }
+
+    onCreateNote({
+      mode: "selection",
+      sourceMessageId: branchAction.sourceMessageId,
+      sourceNodeId: branchAction.sourceNodeId,
+      content: branchAction.selectedText
+    });
+
+    window.getSelection()?.removeAllRanges();
+    hideBranchAction();
+  }, [branchAction, hideBranchAction, onCreateNote]);
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      updateBranchActionFromSelection();
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, [updateBranchActionFromSelection]);
 
   useEffect(() => {
     if (!branchAction) {
@@ -237,9 +339,7 @@ export function ChatPane({
       return;
     }
 
-    const target = scrollAreaRef.current.querySelector<HTMLElement>(
-      `[data-message-id='${focusedMessageId}']`
-    );
+    const target = scrollAreaRef.current.querySelector<HTMLElement>(`[data-message-id='${focusedMessageId}']`);
     const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     target?.scrollIntoView?.({
       block: "center",
@@ -254,8 +354,10 @@ export function ChatPane({
 
     try {
       await navigator.clipboard.writeText(content);
-    } catch {
-      // ignore clipboard failure in unsupported environments
+    } catch (error) {
+      logError("chat.copy", error, {
+        message: "Failed to copy assistant content."
+      });
     }
   }, []);
 
@@ -267,28 +369,20 @@ export function ChatPane({
 
     onSendMessage(value);
     setDraft("");
+    setIsToolsOpen(false);
   }, [draft, onSendMessage]);
 
   return (
-    <div className="flex h-full flex-col" onMouseDownCapture={hideBranchAction}>
+    <div className="flex h-full flex-col">
       <div
         ref={scrollAreaRef}
         data-testid="chat-scroll-area"
-        className="flex-1 space-y-6 overflow-auto px-6 py-6"
-        onMouseUp={handleSelection}
+        className="flex-1 space-y-5 overflow-auto px-6 py-6"
+        onMouseUp={updateBranchActionFromSelection}
+        onPointerUp={updateBranchActionFromSelection}
+        onKeyUp={updateBranchActionFromSelection}
         onScroll={hideBranchAction}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            hideBranchAction();
-          }
-        }}
       >
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground">
-            当前分支: {activeNodeTitle}
-          </span>
-        </div>
-
         {messages.length === 0 ? (
           <div className="rounded-xl border border-dashed bg-card/80 px-4 py-6 text-sm text-muted-foreground">
             当前分支暂无消息，输入问题后将以流式 Mock 回复。
@@ -300,10 +394,9 @@ export function ChatPane({
             const { message } = block;
             const roleClass =
               message.role === "user"
-                ? "ml-auto w-3/4 bg-secondary/90 text-secondary-foreground"
-                : "w-4/5 bg-card hover:border-foreground/20";
-            const focusedClass =
-              message.id === focusedMessageId ? "border-ring/50 ring-2 ring-ring/40" : "";
+                ? "ml-auto max-w-[78%] bg-secondary/90 text-secondary-foreground"
+                : "max-w-[80%] bg-card";
+            const focusedClass = message.id === focusedMessageId ? "border-ring/50 ring-2 ring-ring/40" : "";
 
             return (
               <div
@@ -318,7 +411,7 @@ export function ChatPane({
                   focusedClass
                 )}
               >
-                <span>{message.content}</span>
+                <span className="select-text whitespace-pre-wrap">{message.content}</span>
               </div>
             );
           }
@@ -326,8 +419,7 @@ export function ChatPane({
           const currentIndex = activeRetryByGroup[block.groupId] ?? block.variants.length - 1;
           const boundedIndex = Math.max(0, Math.min(currentIndex, block.variants.length - 1));
           const activeVariant = block.variants[boundedIndex];
-          const focusedClass =
-            activeVariant.id === focusedMessageId ? "border-ring/50 ring-2 ring-ring/40" : "";
+          const focusedClass = activeVariant.id === focusedMessageId ? "border-ring/50 ring-2 ring-ring/40" : "";
 
           return (
             <div
@@ -336,26 +428,37 @@ export function ChatPane({
               data-message-id={activeVariant.id}
               data-node-id={activeVariant.nodeId}
               data-message-role="assistant"
-              className={cn(
-                "w-4/5 rounded-2xl border bg-card px-4 py-3 text-sm leading-relaxed transition-colors duration-150 motion-reduce:transition-none hover:border-foreground/20",
-                focusedClass
-              )}
+              className="max-w-[80%]"
             >
-              <span>{activeVariant.content}</span>
+              <div
+                className={cn(
+                  "rounded-2xl border bg-card px-4 py-3 text-sm leading-relaxed transition-colors duration-150 motion-reduce:transition-none hover:border-foreground/20",
+                  focusedClass
+                )}
+              >
+                <span className="select-text whitespace-pre-wrap">{activeVariant.content}</span>
+              </div>
 
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <button
+              <div className="mt-1 flex items-center gap-0.5 pl-1 text-muted-foreground">
+                <Button
                   type="button"
-                  className="rounded px-1 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Copy"
+                  className="h-7 w-7"
                   onClick={() => {
                     void handleCopyMessage(activeVariant.content);
                   }}
                 >
-                  Copy
-                </button>
-                <button
+                  <Copy className="h-4 w-4" />
+                </Button>
+
+                <Button
                   type="button"
-                  className="rounded px-1 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Retry"
+                  className="h-7 w-7"
                   disabled={activeVariant.isStreaming}
                   onClick={() =>
                     onRetryMessage({
@@ -365,18 +468,19 @@ export function ChatPane({
                     })
                   }
                 >
-                  Retry
-                </button>
-                <button
+                  <RotateCcw className="h-4 w-4" />
+                </Button>
+
+                <Button type="button" variant="ghost" size="icon" aria-label="Share" className="h-7 w-7" disabled>
+                  <Share2 className="h-4 w-4" />
+                </Button>
+
+                <Button
                   type="button"
-                  disabled
-                  className="cursor-not-allowed rounded px-1 py-0.5 opacity-50"
-                >
-                  Share
-                </button>
-                <button
-                  type="button"
-                  className="rounded px-1 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Create Branch"
+                  className="h-7 w-7"
                   onClick={() =>
                     onCreateBranch({
                       mode: "clone",
@@ -385,15 +489,35 @@ export function ChatPane({
                     })
                   }
                 >
-                  Create Branch
-                </button>
+                  <GitBranchPlus className="h-4 w-4" />
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Take Note"
+                  className="h-7 w-7"
+                  onClick={() =>
+                    onCreateNote({
+                      mode: "message",
+                      sourceMessageId: activeVariant.id,
+                      sourceNodeId: activeVariant.nodeId,
+                      content: activeVariant.content
+                    })
+                  }
+                >
+                  <NotebookPen className="h-4 w-4" />
+                </Button>
 
                 {block.variants.length > 1 ? (
-                  <div className="ml-1 inline-flex items-center gap-1.5">
-                    <button
+                  <div className="ml-1 inline-flex items-center gap-1 rounded-full border px-1 py-0.5 text-[11px] text-muted-foreground">
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="icon"
                       aria-label="Show previous retry"
-                      className="inline-flex h-5 w-5 items-center justify-center rounded border text-[11px] transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                      className="h-5 w-5 rounded-full"
                       onClick={() =>
                         setActiveRetryByGroup((current) => ({
                           ...current,
@@ -401,13 +525,15 @@ export function ChatPane({
                         }))
                       }
                     >
-                      {"<"}
-                    </button>
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                    </Button>
                     <span>{`${boundedIndex + 1} / ${block.variants.length}`}</span>
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="icon"
                       aria-label="Show next retry"
-                      className="inline-flex h-5 w-5 items-center justify-center rounded border text-[11px] transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                      className="h-5 w-5 rounded-full"
                       onClick={() =>
                         setActiveRetryByGroup((current) => ({
                           ...current,
@@ -415,8 +541,8 @@ export function ChatPane({
                         }))
                       }
                     >
-                      {">"}
-                    </button>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
                 ) : null}
               </div>
@@ -426,37 +552,103 @@ export function ChatPane({
       </div>
 
       {branchAction ? (
-        <button
-          type="button"
-          aria-keyshortcuts="Meta+Enter Control+Enter"
-          className="fixed z-20 inline-flex -translate-x-1/2 -translate-y-full items-center gap-1 rounded-full border bg-card px-3 py-1 text-xs text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        <div
+          data-branch-fab="true"
+          className="fixed z-20 -translate-x-1/2 -translate-y-full rounded-full border bg-card p-1 shadow-sm"
           style={{ left: branchAction.x, top: branchAction.y }}
-          onMouseDown={(event) => {
-            event.stopPropagation();
-          }}
-          onClick={handleBranchFromSelection}
         >
-          分叉
-          <span className="text-[10px] text-muted-foreground">⌘/Ctrl+Enter</span>
-        </button>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label="Create branch from selection"
+              aria-keyshortcuts="Meta+Enter Control+Enter"
+              className="h-7 rounded-full px-2 text-xs"
+              onClick={handleBranchFromSelection}
+            >
+              <GitBranchPlus className="h-3.5 w-3.5" />
+              分叉
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label="Take note from selection"
+              className="h-7 rounded-full px-2 text-xs"
+              onClick={handleNoteFromSelection}
+            >
+              <NotebookPen className="h-3.5 w-3.5" />
+              记录笔记
+            </Button>
+          </div>
+        </div>
       ) : null}
 
-      <div className="border-t bg-background/80 px-6 py-4">
-        <div className="flex items-end gap-3 rounded-xl border bg-card px-3 py-3">
-          <Sparkles className="mb-2 h-4 w-4 shrink-0 text-muted-foreground" />
-          <textarea
+      <div className="border-t bg-background/90 px-6 py-4">
+        <div className="mx-auto flex max-w-4xl items-center gap-2 rounded-3xl border bg-card p-2 shadow-sm">
+          <Popover open={isToolsOpen} onOpenChange={setIsToolsOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="打开附件菜单"
+                className="h-9 w-9 rounded-full"
+              >
+                <Plus className="h-5 w-5" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[320px] rounded-2xl p-2">
+              <div className="space-y-1">
+                {toolActions.map((action, index) => (
+                  <div key={action.label}>
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground",
+                        action.emphasized ? "bg-muted" : ""
+                      )}
+                      onClick={() => setIsToolsOpen(false)}
+                    >
+                      <action.icon className="h-5 w-5 text-foreground/90" />
+                      <span className="flex-1">{action.label}</span>
+                      {action.shortcut ? <span className="text-xs text-muted-foreground">{action.shortcut}</span> : null}
+                    </button>
+                    {index === 0 ? <Separator className="my-1" /> : null}
+                  </div>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          <input
             aria-label="聊天输入"
-            className="max-h-44 min-h-8 w-full resize-none bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            className="h-9 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
             placeholder="输入你的问题，按 Enter 发送"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter") {
                 event.preventDefault();
                 handleSubmitDraft();
               }
             }}
           />
+
+          <Button type="button" variant="ghost" size="icon" aria-label="语音输入" className="h-9 w-9 rounded-full">
+            <Mic className="h-5 w-5" />
+          </Button>
+
+          <Button
+            type="button"
+            size="icon"
+            aria-label="发送消息"
+            className="h-9 w-9 rounded-full bg-foreground text-background hover:bg-foreground/90"
+            onClick={handleSubmitDraft}
+          >
+            <ArrowUp className="h-5 w-5" />
+          </Button>
         </div>
       </div>
     </div>

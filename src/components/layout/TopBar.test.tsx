@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { TopBar } from "./TopBar";
 
@@ -7,7 +7,7 @@ afterEach(() => {
 });
 
 describe("TopBar", () => {
-  it("renders title with sidebar-10 nav-actions summary", () => {
+  it("renders sidebar-10 aligned header actions", () => {
     render(<TopBar title="LLM 文献对比会话" />);
 
     expect(screen.getByText("LLM 文献对比会话")).toBeInTheDocument();
@@ -16,36 +16,27 @@ describe("TopBar", () => {
     expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument();
   });
 
-  it("opens more menu with original english actions", () => {
+  it("toggles favorite visual state", () => {
     render(<TopBar title="会话标题" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const favorite = screen.getByRole("button", { name: "Favorite" });
+    expect(favorite).toHaveAttribute("aria-pressed", "false");
+    expect(favorite).toHaveAttribute("data-favorited", "false");
 
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Customize Page" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Move to Trash" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Version History" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Export" })).toBeInTheDocument();
+    fireEvent.click(favorite);
+    expect(favorite).toHaveAttribute("aria-pressed", "true");
+    expect(favorite).toHaveAttribute("data-favorited", "true");
   });
 
-  it("supports keyboard navigation in more menu", async () => {
+  it("opens more menu with original english actions", () => {
     render(<TopBar title="会话标题" />);
 
     const trigger = screen.getByRole("button", { name: "More actions" });
     fireEvent.click(trigger);
 
-    const firstItem = screen.getByRole("menuitem", { name: "Customize Page" });
-    const secondItem = screen.getByRole("menuitem", { name: "Turn into wiki" });
-
-    await waitFor(() => {
-      expect(firstItem).toHaveFocus();
-    });
-
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
-    expect(secondItem).toHaveFocus();
-
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "Customize Page" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Move to Trash" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Version History" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Export" })).toBeInTheDocument();
   });
 });

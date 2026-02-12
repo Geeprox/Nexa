@@ -218,15 +218,18 @@ export function SidebarTrigger({
     <button
       type="button"
       aria-label="切换侧边栏"
+      {...props}
       className={cn(
         "inline-flex size-7 items-center justify-center rounded-md text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
         className
       )}
       onClick={(event) => {
         onClick?.(event);
+        if (event.defaultPrevented) {
+          return;
+        }
         toggleSidebar();
       }}
-      {...props}
     >
       <PanelLeft className="h-4 w-4" />
       <span className="sr-only">切换侧边栏</span>
@@ -234,20 +237,30 @@ export function SidebarTrigger({
   );
 }
 
-export function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
+export function SidebarRail({
+  className,
+  onClick,
+  ...props
+}: React.ComponentProps<"button">) {
   const { toggleSidebar, state } = useSidebar();
 
   return (
     <button
       type="button"
       aria-label="切换侧边栏"
+      {...props}
       className={cn(
         "absolute inset-y-0 top-0 hidden w-3 -translate-x-1/2 cursor-ew-resize md:block",
         state === "expanded" ? "right-0" : "right-[-6px]",
         className
       )}
-      onClick={toggleSidebar}
-      {...props}
+      onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented) {
+          return;
+        }
+        toggleSidebar();
+      }}
     />
   );
 }

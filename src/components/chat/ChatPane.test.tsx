@@ -30,31 +30,38 @@ describe("ChatPane", () => {
 
     render(
       <ChatPane
-        activeNodeTitle="起点问题"
         messages={baseMessages}
         onCreateBranch={onCreateBranch}
+        onCreateNote={vi.fn()}
         onRetryMessage={vi.fn()}
         onSendMessage={vi.fn()}
       />
     );
 
     const assistantText = screen.getByText("可以先定义评估维度，再做对照实验。");
-    const textNode = assistantText.firstChild;
+    const textNode = assistantText.firstChild as Node;
     expect(textNode).toBeTruthy();
+    const assistantGroup = screen.getByTestId("assistant-group-m-user-1");
 
     const removeAllRanges = vi.fn();
     vi.spyOn(window, "getSelection").mockReturnValue({
       isCollapsed: false,
+      rangeCount: 1,
       toString: () => "评估维度",
       anchorNode: textNode,
+      focusNode: textNode,
       getRangeAt: () => ({
-        getBoundingClientRect: () => ({ left: 120, width: 60, top: 150 })
+        startContainer: textNode,
+        endContainer: textNode,
+        commonAncestorContainer: textNode,
+        getBoundingClientRect: () => ({ left: 120, width: 60, top: 150 }),
+        intersectsNode: (node: Node) => node === assistantGroup
       }),
       removeAllRanges
     } as unknown as Selection);
 
     fireEvent.mouseUp(screen.getByTestId("chat-scroll-area"));
-    fireEvent.click(screen.getByRole("button", { name: /分叉/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create branch from selection" }));
 
     expect(onCreateBranch).toHaveBeenCalledWith({
       mode: "selection",
@@ -65,24 +72,115 @@ describe("ChatPane", () => {
     expect(removeAllRanges).toHaveBeenCalledTimes(1);
   });
 
+  it("opens branch action from selectionchange event", () => {
+    render(
+      <ChatPane
+        messages={baseMessages}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    const assistantText = screen.getByText("可以先定义评估维度，再做对照实验。");
+    const textNode = assistantText.firstChild as Node;
+    const assistantGroup = screen.getByTestId("assistant-group-m-user-1");
+
+    vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => "评估维度",
+      anchorNode: textNode,
+      focusNode: textNode,
+      getRangeAt: () => ({
+        startContainer: textNode,
+        endContainer: textNode,
+        commonAncestorContainer: textNode,
+        getBoundingClientRect: () => ({ left: 140, width: 48, top: 180 }),
+        intersectsNode: (node: Node) => node === assistantGroup
+      }),
+      removeAllRanges: vi.fn()
+    } as unknown as Selection);
+
+    fireEvent(document, new Event("selectionchange"));
+    expect(screen.getByRole("button", { name: "Create branch from selection" })).toBeInTheDocument();
+  });
+
+  it("keeps branch action available on reversed selection via selectionchange", () => {
+    render(
+      <ChatPane
+        messages={baseMessages}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    const assistantText = screen.getByText("可以先定义评估维度，再做对照实验。");
+    const textNode = assistantText.firstChild as Node;
+    const outsideNode = document.createTextNode("outside");
+    document.body.appendChild(outsideNode);
+    const assistantGroup = screen.getByTestId("assistant-group-m-user-1");
+
+    vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => "对照实验",
+      anchorNode: outsideNode,
+      focusNode: textNode,
+      getRangeAt: () => ({
+        startContainer: outsideNode,
+        endContainer: textNode,
+        commonAncestorContainer: document.body,
+        getBoundingClientRect: () => ({ left: 180, width: 40, top: 220 }),
+        intersectsNode: (node: Node) => node === assistantGroup
+      }),
+      removeAllRanges: vi.fn()
+    } as unknown as Selection);
+
+    fireEvent.mouseUp(screen.getByTestId("chat-scroll-area"));
+    expect(screen.getByRole("button", { name: "Create branch from selection" })).toBeInTheDocument();
+
+    outsideNode.remove();
+  });
+
   it("submits user draft on Enter", () => {
     const onSendMessage = vi.fn();
 
     render(
       <ChatPane
-        activeNodeTitle="起点问题"
         messages={baseMessages}
         onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
         onRetryMessage={vi.fn()}
         onSendMessage={onSendMessage}
       />
     );
 
-    const textarea = screen.getByLabelText("聊天输入");
-    fireEvent.change(textarea, { target: { value: "请给一个执行清单" } });
-    fireEvent.keyDown(textarea, { key: "Enter" });
+    const input = screen.getByLabelText("聊天输入");
+    fireEvent.change(input, { target: { value: "请给一个执行清单" } });
+    fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSendMessage).toHaveBeenCalledWith("请给一个执行清单");
+  });
+
+  it("opens tools popover from plus button", () => {
+    render(
+      <ChatPane
+        messages={baseMessages}
+        onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "打开附件菜单" }));
+
+    expect(screen.getByRole("button", { name: /添加照片和文件/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建图片" })).toBeInTheDocument();
   });
 
   it("supports retry controls and retry callback", () => {
@@ -90,7 +188,6 @@ describe("ChatPane", () => {
 
     render(
       <ChatPane
-        activeNodeTitle="起点问题"
         messages={[
           ...baseMessages,
           {
@@ -103,12 +200,12 @@ describe("ChatPane", () => {
           }
         ]}
         onCreateBranch={vi.fn()}
+        onCreateNote={vi.fn()}
         onRetryMessage={onRetryMessage}
         onSendMessage={vi.fn()}
       />
     );
 
-    expect(screen.getByText("Copy")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(onRetryMessage).toHaveBeenCalledWith({
@@ -129,9 +226,9 @@ describe("ChatPane", () => {
 
     render(
       <ChatPane
-        activeNodeTitle="起点问题"
         messages={baseMessages}
         onCreateBranch={onCreateBranch}
+        onCreateNote={vi.fn()}
         onRetryMessage={vi.fn()}
         onSendMessage={vi.fn()}
       />
@@ -143,6 +240,28 @@ describe("ChatPane", () => {
       mode: "clone",
       sourceMessageId: "m-assistant-1",
       sourceNodeId: "root"
+    });
+  });
+
+  it("creates note from assistant action button", () => {
+    const onCreateNote = vi.fn();
+
+    render(
+      <ChatPane
+        messages={baseMessages}
+        onCreateBranch={vi.fn()}
+        onCreateNote={onCreateNote}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Take Note" }));
+    expect(onCreateNote).toHaveBeenCalledWith({
+      mode: "message",
+      sourceMessageId: "m-assistant-1",
+      sourceNodeId: "root",
+      content: "可以先定义评估维度，再做对照实验。"
     });
   });
 });
