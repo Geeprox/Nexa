@@ -206,7 +206,7 @@ export function GraphPane({
   );
 
   return (
-    <div className="flex h-full flex-col border-l bg-background/70">
+    <div className="flex h-full flex-col bg-background/70">
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <GitBranch className="h-4 w-4" />

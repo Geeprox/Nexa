@@ -4,25 +4,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BranchCreatePayload,
   ChatMessage,
-  ChatPane
+  ChatPane,
+  RetryMessagePayload
 } from "@/components/chat/ChatPane";
 import { GraphNode, GraphPane } from "@/components/graph/GraphPane";
-import { Sidebar } from "@/components/layout/Sidebar";
+import { Sidebar, SidebarSection } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { InMemoryAdapter } from "@/lib/db";
-import { TagRepository } from "@/lib/db/tagRepository";
-import { AutoTagOrchestrator } from "@/lib/jobs/autoTagOrchestrator";
-import { JobQueue } from "@/lib/jobs/queue";
-import { NoteSearchHit } from "@/lib/db/types";
-import { ConversationSearchRecord, FtsSearchRepository } from "@/lib/search/ftsSearchRepository";
-import { autoTagEntity } from "@/lib/tagging";
+import { pickRandomMockReply } from "@/lib/mock/chatResponses";
 import {
   ConversationSnapshot,
   loadConversationSnapshot,
   saveConversationSnapshot
 } from "@/lib/session/conversationSnapshot";
-import { cn } from "@/lib/utils";
 
 const initialMessagesByNode: Record<string, ChatMessage[]> = {
   root: [
@@ -37,14 +31,24 @@ const initialMessagesByNode: Record<string, ChatMessage[]> = {
       nodeId: "root",
       role: "assistant",
       content:
-        "可以先定义比较框架（研究问题、方法、数据、结论），再用 LLM 逐篇抽取关键变量，最后生成对照表与差异矩阵。"
+        "可以先把文献对比拆成固定字段：研究问题、数据来源、方法路线、实验设置、核心结论和局限。随后让模型按统一模板逐篇抽取，再用表格聚合。关键不在于一次回答很长，而在于字段定义稳定，这样你才能持续追加新文献并做横向比较。",
+      replyToMessageId: "m-user-1",
+      retryIndex: 1
+    },
+    {
+      id: "m-user-2",
+      nodeId: "root",
+      role: "user",
+      content: "那如果不同论文指标口径不一致怎么办？"
     },
     {
       id: "m-assistant-2",
       nodeId: "root",
       role: "assistant",
       content:
-        "如果你选中某一句话，可以立即分叉追问，系统会在右侧图谱创建新节点。"
+        "先做指标归一化字典，把同义指标映射到统一维度，比如把不同命名的准确率、召回率映射到同一评价层。对无法直接映射的指标，要求模型输出“原指标 + 解释 + 可比性等级”。最终你会得到一个既能自动聚合又保留差异上下文的比较矩阵，避免把不可比数据硬合并。",
+      replyToMessageId: "m-user-2",
+      retryIndex: 1
     }
   ]
 };
@@ -54,7 +58,7 @@ const initialNodes: GraphNode[] = [
     id: "root",
     parentId: null,
     title: "起点问题",
-    createdAt: new Date().toISOString(),
+    createdAt: "2026-02-12T09:00:00.000Z",
     position: {
       x: 40,
       y: 140
@@ -79,43 +83,42 @@ function nextBranchPosition(allNodes: GraphNode[], parentId: string) {
   const children = allNodes.filter((node) => node.parentId === parentId);
   return {
     x: parent.position.x + 280,
-    y: parent.position.y + children.length * 120
+    y: parent.position.y + children.length * 140
   };
 }
 
-interface ConversationTagEntry {
-  name: string;
-  source: "manual" | "auto";
-  confidence: number | null;
+function deriveConversationTitle(messages: ChatMessage[]) {
+  const firstUserMessage = messages.find((message) => message.role === "user")?.content ?? "未命名会话";
+  const compact = firstUserMessage.replace(/\s+/g, " ").trim();
+  if (compact.length <= 18) {
+    return compact;
+  }
+  return `${compact.slice(0, 18)}...`;
 }
 
-function normalizeTagName(name: string) {
-  return name.trim().toLowerCase();
-}
+function cloneConversationContext(
+  sourceMessages: ChatMessage[],
+  sourceMessageId: string,
+  targetNodeId: string
+) {
+  const cutoffIndex = sourceMessages.findIndex((message) => message.id === sourceMessageId);
+  const slice = cutoffIndex >= 0 ? sourceMessages.slice(0, cutoffIndex + 1) : sourceMessages;
 
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(false);
+  const idMap = new Map<string, string>();
+  for (const message of slice) {
+    idMap.set(message.id, `m-${crypto.randomUUID().slice(0, 8)}`);
+  }
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) {
-      return;
-    }
-
-    const media = window.matchMedia(query);
-    const sync = () => setMatches(media.matches);
-
-    sync();
-    media.addEventListener("change", sync);
-    return () => {
-      media.removeEventListener("change", sync);
-    };
-  }, [query]);
-
-  return matches;
+  return slice.map((message) => ({
+    ...message,
+    id: idMap.get(message.id) ?? `m-${crypto.randomUUID().slice(0, 8)}`,
+    nodeId: targetNodeId,
+    replyToMessageId: message.replyToMessageId ? idMap.get(message.replyToMessageId) : undefined,
+    isStreaming: false
+  }));
 }
 
 export default function HomePage() {
-  const isCompactLayout = useMediaQuery("(max-width: 1200px)");
   const initialSnapshot = useMemo<ConversationSnapshot>(() => {
     return (
       loadConversationSnapshot() ?? {
@@ -132,86 +135,244 @@ export default function HomePage() {
   const [messagesByNode, setMessagesByNode] = useState(initialSnapshot.messagesByNode);
   const [nodes, setNodes] = useState(initialSnapshot.nodes);
   const [activeNodeId, setActiveNodeId] = useState(initialSnapshot.activeNodeId);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<ConversationSearchRecord[]>([]);
-  const [noteSearchResults, setNoteSearchResults] = useState<NoteSearchHit[]>([]);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [conversationTags, setConversationTags] = useState<ConversationTagEntry[]>(
-    initialSnapshot.conversationTags
-  );
-  const [dismissedAutoTags, setDismissedAutoTags] = useState<string[]>(
-    initialSnapshot.dismissedAutoTags
-  );
-  const [tagError, setTagError] = useState<string | null>(null);
   const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
-  const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false);
-  const [hasHydratedTags, setHasHydratedTags] = useState(false);
-  const [pendingTagJobs, setPendingTagJobs] = useState(0);
-  const latestAutoTagRunId = useRef(0);
-  const [tagAdapter] = useState(() => new InMemoryAdapter());
-  const [tagRepository] = useState(() => new TagRepository(tagAdapter));
-  const [jobQueue] = useState(
-    () =>
-      new JobQueue({
-        onJobUpdate: async (job) => {
-          await tagAdapter.enqueueJob({
-            id: job.id,
-            type: job.type,
-            payload: JSON.stringify(job.payload),
-            status: job.status,
-            createdAt: job.createdAt
-          });
-        }
-      })
-  );
-  const [autoTagOrchestrator] = useState(
-    () => new AutoTagOrchestrator(jobQueue, tagRepository, autoTagEntity)
-  );
+  const [activeSection, setActiveSection] = useState<SidebarSection>("ask-ai");
+  const streamTimersRef = useRef<Map<string, number>>(new Map());
 
-  const handleCreateBranch = useCallback((payload: BranchCreatePayload) => {
-    const nodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
-
-    setNodes((current) => {
-      const nextNode: GraphNode = {
-        id: nodeId,
-        parentId: payload.sourceNodeId,
-        title: toBranchTitle(payload.selectedText),
-        createdAt: new Date().toISOString(),
-        position: nextBranchPosition(current, payload.sourceNodeId)
-      };
-      return [...current, nextNode];
-    });
-
-    setMessagesByNode((current) => ({
-      ...current,
-      [nodeId]: [
-        {
-          id: `m-user-${crypto.randomUUID().slice(0, 8)}`,
-          nodeId,
-          role: "user",
-          content: `围绕这段内容继续追问：${payload.selectedText}`
-        }
-      ]
-    }));
-    setFocusedMessageId(null);
-    setActiveNodeId(nodeId);
+  const clearStreamingTimer = useCallback((messageId: string) => {
+    const timerId = streamTimersRef.current.get(messageId);
+    if (timerId !== undefined) {
+      window.clearInterval(timerId);
+      streamTimersRef.current.delete(messageId);
+    }
   }, []);
+
+  useEffect(() => {
+    const activeTimers = streamTimersRef.current;
+    return () => {
+      for (const timerId of activeTimers.values()) {
+        window.clearInterval(timerId);
+      }
+      activeTimers.clear();
+    };
+  }, []);
+
+  const startStreamingAssistantReply = useCallback(
+    ({
+      nodeId,
+      replyToMessageId,
+      content,
+      messageId,
+      retryIndex,
+      insertAfterMessageId
+    }: {
+      nodeId: string;
+      replyToMessageId: string;
+      content: string;
+      messageId: string;
+      retryIndex: number;
+      insertAfterMessageId?: string;
+    }) => {
+      clearStreamingTimer(messageId);
+
+      setMessagesByNode((current) => {
+        const bucket = current[nodeId] ?? [];
+        const nextAssistantMessage: ChatMessage = {
+          id: messageId,
+          nodeId,
+          role: "assistant",
+          content: "",
+          replyToMessageId,
+          retryIndex,
+          isStreaming: true
+        };
+
+        if (!insertAfterMessageId) {
+          return {
+            ...current,
+            [nodeId]: [...bucket, nextAssistantMessage]
+          };
+        }
+
+        const anchorIndex = bucket.findIndex((message) => message.id === insertAfterMessageId);
+        if (anchorIndex < 0) {
+          return {
+            ...current,
+            [nodeId]: [...bucket, nextAssistantMessage]
+          };
+        }
+
+        return {
+          ...current,
+          [nodeId]: [
+            ...bucket.slice(0, anchorIndex + 1),
+            nextAssistantMessage,
+            ...bucket.slice(anchorIndex + 1)
+          ]
+        };
+      });
+
+      let cursor = 0;
+      const intervalId = window.setInterval(() => {
+        const chunkSize = 16 + Math.floor(Math.random() * 10);
+        cursor = Math.min(content.length, cursor + chunkSize);
+        const nextContent = content.slice(0, cursor);
+        const finished = cursor >= content.length;
+
+        setMessagesByNode((current) => {
+          const bucket = current[nodeId] ?? [];
+          return {
+            ...current,
+            [nodeId]: bucket.map((message) => {
+              if (message.id !== messageId) {
+                return message;
+              }
+              return {
+                ...message,
+                content: nextContent,
+                isStreaming: !finished
+              };
+            })
+          };
+        });
+
+        if (finished) {
+          clearStreamingTimer(messageId);
+        }
+      }, 45);
+
+      streamTimersRef.current.set(messageId, intervalId);
+    },
+    [clearStreamingTimer]
+  );
+
+  const handleSendMessage = useCallback(
+    (value: string) => {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return;
+      }
+
+      const nodeId = activeNodeId;
+      const userMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+      setMessagesByNode((current) => {
+        const bucket = current[nodeId] ?? [];
+        return {
+          ...current,
+          [nodeId]: [
+            ...bucket,
+            {
+              id: userMessageId,
+              nodeId,
+              role: "user",
+              content: trimmed
+            }
+          ]
+        };
+      });
+
+      const reply = pickRandomMockReply(trimmed);
+      const assistantMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+      startStreamingAssistantReply({
+        nodeId,
+        replyToMessageId: userMessageId,
+        content: reply,
+        messageId: assistantMessageId,
+        retryIndex: 1
+      });
+    },
+    [activeNodeId, startStreamingAssistantReply]
+  );
+
+  const handleRetryMessage = useCallback(
+    (payload: RetryMessagePayload) => {
+      const sourceMessages = messagesByNode[payload.sourceNodeId] ?? [];
+      const sourcePrompt = sourceMessages.find(
+        (message) => message.id === payload.replyToMessageId && message.role === "user"
+      );
+
+      if (!sourcePrompt) {
+        return;
+      }
+
+      const previousReplyMessages = sourceMessages.filter(
+        (message) =>
+          message.role === "assistant" && message.replyToMessageId === payload.replyToMessageId
+      );
+      const previousReplies = previousReplyMessages
+        .map((message) => message.content)
+        .filter((item) => item.trim().length > 0);
+
+      const retryIndex = previousReplyMessages.length + 1;
+      const reply = pickRandomMockReply(sourcePrompt.content, previousReplies);
+      const assistantMessageId = `m-${crypto.randomUUID().slice(0, 8)}`;
+
+      startStreamingAssistantReply({
+        nodeId: payload.sourceNodeId,
+        replyToMessageId: payload.replyToMessageId,
+        content: reply,
+        messageId: assistantMessageId,
+        retryIndex,
+        insertAfterMessageId: previousReplyMessages.at(-1)?.id
+      });
+    },
+    [messagesByNode, startStreamingAssistantReply]
+  );
+
+  const handleCreateBranch = useCallback(
+    (payload: BranchCreatePayload) => {
+      const sourceMessages = messagesByNode[payload.sourceNodeId] ?? [];
+      if (sourceMessages.length === 0) {
+        return;
+      }
+
+      const branchNodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
+      const sourceMessage = sourceMessages.find((message) => message.id === payload.sourceMessageId);
+      const titleSource = payload.mode === "selection" ? payload.selectedText : sourceMessage?.content ?? "新分支";
+      const clonedMessages = cloneConversationContext(
+        sourceMessages,
+        payload.sourceMessageId,
+        branchNodeId
+      );
+
+      const nextMessages =
+        payload.mode === "selection"
+          ? [
+              ...clonedMessages,
+              {
+                id: `m-${crypto.randomUUID().slice(0, 8)}`,
+                nodeId: branchNodeId,
+                role: "user" as const,
+                content: `请重点围绕以下选中文案继续深入，并将其作为本次回答的最高优先级上下文：\n\n「${payload.selectedText}」`
+              }
+            ]
+          : clonedMessages;
+
+      setNodes((current) => [
+        ...current,
+        {
+          id: branchNodeId,
+          parentId: payload.sourceNodeId,
+          title: toBranchTitle(titleSource),
+          createdAt: new Date().toISOString(),
+          position: nextBranchPosition(current, payload.sourceNodeId)
+        }
+      ]);
+
+      setMessagesByNode((current) => ({
+        ...current,
+        [branchNodeId]: nextMessages
+      }));
+
+      setFocusedMessageId(null);
+      setActiveNodeId(branchNodeId);
+    },
+    [messagesByNode]
+  );
 
   const handleSelectNode = useCallback((nodeId: string) => {
     setFocusedMessageId(null);
     setActiveNodeId(nodeId);
-  }, []);
-
-  const handleSearchSelect = useCallback((result: ConversationSearchRecord) => {
-    setActiveNodeId(result.nodeId);
-    setFocusedMessageId(result.messageId);
-  }, []);
-
-  const handleNoteSearchSelect = useCallback((result: NoteSearchHit) => {
-    if (result.sourceNodeId) {
-      setActiveNodeId(result.sourceNodeId);
-    }
-    setFocusedMessageId(result.sourceMessageId ?? null);
   }, []);
 
   const handleMoveNode = useCallback((nodeId: string, position: { x: number; y: number }) => {
@@ -219,213 +380,6 @@ export default function HomePage() {
       current.map((node) => (node.id === nodeId ? { ...node, position } : node))
     );
   }, []);
-
-  const handleToggleGraphPanel = useCallback(() => {
-    setIsGraphPanelOpen((open) => !open);
-  }, []);
-
-  const handleAddManualTag = useCallback((name: string) => {
-    const tagName = name.trim();
-    if (!tagName) {
-      return;
-    }
-
-    const normalized = normalizeTagName(tagName);
-    setDismissedAutoTags((current) => current.filter((item) => item !== normalized));
-    setConversationTags((current) => {
-      if (current.some((item) => normalizeTagName(item.name) === normalized)) {
-        return current;
-      }
-      return [...current, { name: tagName, source: "manual", confidence: null }];
-    });
-  }, []);
-
-  const handleRemoveManualTag = useCallback((name: string) => {
-    const normalized = normalizeTagName(name);
-    setConversationTags((current) =>
-      current.filter(
-        (item) => !(item.source === "manual" && normalizeTagName(item.name) === normalized)
-      )
-    );
-  }, []);
-
-  const handleRemoveAutoTag = useCallback((name: string) => {
-    const normalized = normalizeTagName(name);
-    setDismissedAutoTags((current) => (current.includes(normalized) ? current : [...current, normalized]));
-    setConversationTags((current) =>
-      current.filter((item) => !(item.source === "auto" && normalizeTagName(item.name) === normalized))
-    );
-  }, []);
-
-  const runAutoTagging = useCallback(async () => {
-    const content = nodes
-      .flatMap((node) => messagesByNode[node.id] ?? [])
-      .map((message) => message.content)
-      .join("\n");
-
-    const runId = latestAutoTagRunId.current + 1;
-    latestAutoTagRunId.current = runId;
-
-    setPendingTagJobs((current) => current + 1);
-    setTagError(null);
-    try {
-      const tags = await autoTagOrchestrator.enqueueAndWait({
-        entityId: "active-conversation",
-        entityType: "conversation",
-        content,
-        dismissedAutoTags
-      });
-      if (latestAutoTagRunId.current === runId) {
-        setConversationTags(tags);
-      }
-    } catch {
-      if (latestAutoTagRunId.current === runId) {
-        setTagError("自动标签任务失败，请稍后重试。");
-      }
-    } finally {
-      setPendingTagJobs((current) => Math.max(0, current - 1));
-    }
-  }, [autoTagOrchestrator, dismissedAutoTags, messagesByNode, nodes]);
-
-  useEffect(() => {
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults([]);
-      setNoteSearchResults([]);
-      setSearchError(null);
-      return;
-    }
-
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        const adapter = new InMemoryAdapter();
-        const repository = new FtsSearchRepository(adapter);
-        const rootNode = nodes.find((node) => node.parentId === null) ?? nodes[0];
-
-        if (!rootNode) {
-          return;
-        }
-
-        await adapter.saveConversation({
-          id: "active-conversation",
-          title: "当前会话",
-          rootNodeId: rootNode.id,
-          createdAt: rootNode.createdAt
-        });
-
-        for (const node of nodes) {
-          await adapter.saveNode({
-            id: node.id,
-            conversationId: "active-conversation",
-            parentId: node.parentId,
-            summary: node.title,
-            status: "active",
-            posX: node.position.x,
-            posY: node.position.y,
-            createdAt: node.createdAt
-          });
-        }
-
-        for (const node of nodes) {
-          const messages = messagesByNode[node.id] ?? [];
-          for (let index = 0; index < messages.length; index += 1) {
-            const message = messages[index];
-            await adapter.saveMessage({
-              id: message.id,
-              nodeId: message.nodeId,
-              role: message.role,
-              content: message.content,
-              createdAt: `${node.createdAt}.${String(index).padStart(3, "0")}`
-            });
-          }
-        }
-
-        const result = await repository.searchAll(query);
-        if (cancelled) {
-          return;
-        }
-
-        setSearchResults(result.conversation);
-        setNoteSearchResults(result.notes);
-        setSearchError(null);
-      } catch {
-        if (cancelled) {
-          return;
-        }
-        setSearchResults([]);
-        setNoteSearchResults([]);
-        setSearchError("搜索失败，请稍后重试。");
-      }
-    };
-
-    void run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [messagesByNode, nodes, searchQuery]);
-
-  useEffect(() => {
-    if (!hasHydratedTags) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      void runAutoTagging();
-    }, 200);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [hasHydratedTags, runAutoTagging]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        const loaded = await tagRepository.loadEntityTags("conversation", "active-conversation");
-        if (cancelled) {
-          return;
-        }
-
-        if (loaded.length > 0) {
-          setConversationTags(loaded);
-        }
-      } catch {
-        if (!cancelled) {
-          setTagError("标签初始化失败，已回退到当前状态。");
-        }
-      } finally {
-        if (!cancelled) {
-          setHasHydratedTags(true);
-        }
-      }
-    };
-
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [tagRepository]);
-
-  useEffect(() => {
-    if (!hasHydratedTags) {
-      return;
-    }
-
-    const run = async () => {
-      try {
-        await tagRepository.syncEntityTags("conversation", "active-conversation", conversationTags);
-      } catch {
-        setTagError("标签保存失败，将在下次变更时重试。");
-      }
-    };
-
-    void run();
-  }, [conversationTags, hasHydratedTags, tagRepository]);
 
   useEffect(() => {
     if (nodes.length === 0) {
@@ -442,113 +396,53 @@ export default function HomePage() {
       nodes,
       messagesByNode,
       activeNodeId,
-      conversationTags,
-      dismissedAutoTags
+      conversationTags: [],
+      dismissedAutoTags: []
     });
-  }, [activeNodeId, conversationTags, dismissedAutoTags, messagesByNode, nodes]);
-
-  useEffect(() => {
-    setIsGraphPanelOpen(!isCompactLayout);
-  }, [isCompactLayout]);
+  }, [activeNodeId, messagesByNode, nodes]);
 
   const activeNode = nodes.find((node) => node.id === activeNodeId);
-  const activeMessages = messagesByNode[activeNodeId] ?? [];
-  const manualTags = useMemo(
-    () => conversationTags.filter((item) => item.source === "manual").map((item) => item.name),
-    [conversationTags]
-  );
-  const autoTags = useMemo(
-    () => conversationTags.filter((item) => item.source === "auto").map((item) => item.name),
-    [conversationTags]
-  );
+  const activeMessages = useMemo(() => messagesByNode[activeNodeId] ?? [], [messagesByNode, activeNodeId]);
+  const hasBranches = nodes.some((node) => node.parentId !== null);
+  const conversationTitle = useMemo(() => deriveConversationTitle(activeMessages), [activeMessages]);
+
+  const topBarTitle = useMemo(() => {
+    if (activeSection === "notes") {
+      return "全部笔记";
+    }
+
+    if (activeSection === "search") {
+      return "搜索";
+    }
+
+    return conversationTitle;
+  }, [activeSection, conversationTitle]);
 
   return (
     <SidebarProvider>
-      <Sidebar
-        searchQuery={searchQuery}
-        searchResults={searchResults}
-        noteResults={noteSearchResults}
-        searchError={searchError}
-        manualTags={manualTags}
-        autoTags={autoTags}
-        onSearchQueryChange={setSearchQuery}
-        onSelectSearchResult={handleSearchSelect}
-        onSelectNoteResult={handleNoteSearchSelect}
-        onAddManualTag={handleAddManualTag}
-        onRemoveManualTag={handleRemoveManualTag}
-        onRemoveAutoTag={handleRemoveAutoTag}
-      />
+      <Sidebar activeSection={activeSection} onSectionChange={setActiveSection} />
 
       <SidebarInset className="min-h-svh">
-        <TopBar
-          isCompactLayout={isCompactLayout}
-          isGraphPanelOpen={isGraphPanelOpen}
-          isGeneratingTags={pendingTagJobs > 0}
-          tagStatusMessage={
-            tagError
-              ? tagError
-              : pendingTagJobs > 0
-                ? "自动标签任务进行中..."
-                : "自动标签已开启"
-          }
-          tagStatusVariant={tagError ? "error" : "default"}
-          onToggleGraphPanel={handleToggleGraphPanel}
-          onGenerateTags={() => {
-            void runAutoTagging();
-          }}
-        />
-        <div
-          className={cn(
-            "grid min-h-0 flex-1",
-            isCompactLayout ? "grid-cols-1" : "grid-cols-[minmax(0,1fr)_360px]"
-          )}
-        >
-          <div className="min-h-0 bg-muted/40">
-            <ChatPane
-              activeNodeTitle={activeNode?.title ?? "未命名分支"}
-              messages={activeMessages}
-              focusedMessageId={focusedMessageId}
-              onCreateBranch={handleCreateBranch}
-            />
-          </div>
-          {!isCompactLayout ? (
+        <TopBar title={topBarTitle} />
+        <div className="min-h-0 flex-1 bg-muted/40">
+          {hasBranches ? (
             <GraphPane
               nodes={nodes}
               activeNodeId={activeNodeId}
               onSelectNode={handleSelectNode}
               onMoveNode={handleMoveNode}
             />
-          ) : null}
-        </div>
-
-        {isCompactLayout ? (
-          <>
-            <button
-              type="button"
-              aria-label="关闭图谱面板"
-              data-testid="graph-drawer-overlay"
-              className={cn(
-                "fixed inset-0 z-30 bg-black/20 transition-opacity duration-200 ease-out motion-reduce:transition-none",
-                isGraphPanelOpen ? "opacity-100" : "pointer-events-none opacity-0"
-              )}
-              onClick={() => setIsGraphPanelOpen(false)}
+          ) : (
+            <ChatPane
+              activeNodeTitle={activeNode?.title ?? "未命名分支"}
+              messages={activeMessages}
+              focusedMessageId={focusedMessageId}
+              onCreateBranch={handleCreateBranch}
+              onRetryMessage={handleRetryMessage}
+              onSendMessage={handleSendMessage}
             />
-            <aside
-              data-testid="graph-drawer"
-              className={cn(
-                "fixed inset-y-0 right-0 z-40 w-[min(92vw,420px)] border-l bg-background shadow-lg transition-transform duration-200 ease-out motion-reduce:transition-none",
-                isGraphPanelOpen ? "translate-x-0" : "translate-x-full"
-              )}
-            >
-              <GraphPane
-                nodes={nodes}
-                activeNodeId={activeNodeId}
-                onSelectNode={handleSelectNode}
-                onMoveNode={handleMoveNode}
-              />
-            </aside>
-          </>
-        ) : null}
+          )}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

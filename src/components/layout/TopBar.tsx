@@ -1,33 +1,60 @@
 "use client";
 
-import { LayoutPanelLeft, MoreHorizontal, Settings, Share2, Wand2 } from "lucide-react";
-import { KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Bell,
+  Copy,
+  CornerUpLeft,
+  CornerUpRight,
+  FileText,
+  GalleryVerticalEnd,
+  LineChart,
+  Link,
+  MoreHorizontal,
+  Settings2,
+  Star,
+  Trash,
+  Trash2
+} from "lucide-react";
+import { KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { cn } from "@/lib/utils";
+
+const actionGroups = [
+  [
+    { label: "Customize Page", icon: Settings2 },
+    { label: "Turn into wiki", icon: FileText }
+  ],
+  [
+    { label: "Copy Link", icon: Link },
+    { label: "Duplicate", icon: Copy },
+    { label: "Move to", icon: CornerUpRight },
+    { label: "Move to Trash", icon: Trash2 }
+  ],
+  [
+    { label: "Undo", icon: CornerUpLeft },
+    { label: "View analytics", icon: LineChart },
+    { label: "Version History", icon: GalleryVerticalEnd },
+    { label: "Show delete pages", icon: Trash },
+    { label: "Notifications", icon: Bell }
+  ],
+  [
+    { label: "Import", icon: ArrowUp },
+    { label: "Export", icon: ArrowDown }
+  ]
+] as const;
 
 interface TopBarProps {
-  isCompactLayout?: boolean;
-  isGraphPanelOpen?: boolean;
-  isGeneratingTags?: boolean;
-  tagStatusMessage?: string;
-  tagStatusVariant?: "default" | "error";
-  onToggleGraphPanel?: () => void;
-  onGenerateTags?: () => void;
+  title: string;
 }
 
-export function TopBar({
-  isCompactLayout = false,
-  isGraphPanelOpen = true,
-  isGeneratingTags = false,
-  tagStatusMessage = "自动标签已开启",
-  tagStatusVariant = "default",
-  onToggleGraphPanel,
-  onGenerateTags
-}: TopBarProps) {
+export function TopBar({ title }: TopBarProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const menuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const flatActions = useMemo(() => actionGroups.flat(), []);
 
   useEffect(() => {
     if (!isMenuOpen) {
@@ -63,6 +90,7 @@ export function TopBar({
 
     window.addEventListener("mousedown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
+
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
@@ -85,6 +113,7 @@ export function TopBar({
     }
 
     const currentIndex = menuItemRefs.current.findIndex((item) => item === document.activeElement);
+
     if (event.key === "ArrowDown") {
       event.preventDefault();
       focusMenuItem(currentIndex < 0 ? 0 : currentIndex + 1);
@@ -133,50 +162,28 @@ export function TopBar({
       <div className="flex items-center gap-2">
         <SidebarTrigger />
         <span className="h-4 w-px bg-border" />
-        <span className="text-sm font-semibold">深度研究会话</span>
-        <span
-          className={cn(
-            "rounded-full px-2 py-1 text-[11px]",
-            tagStatusVariant === "error"
-              ? "bg-destructive/10 text-destructive"
-              : "bg-muted text-muted-foreground"
-          )}
-        >
-          {tagStatusMessage}
-        </span>
+        <span className="line-clamp-1 text-sm font-semibold">{title}</span>
       </div>
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-2 text-sm">
+        <div className="hidden font-medium text-muted-foreground md:inline-block">Edit Oct 08</div>
+
         <button
           type="button"
-          aria-pressed={isCompactLayout ? isGraphPanelOpen : undefined}
-          className={cn(
-            "inline-flex h-8 items-center gap-2 rounded-md px-2 text-xs text-muted-foreground transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            isCompactLayout && isGraphPanelOpen ? "bg-accent text-accent-foreground" : ""
-          )}
-          onClick={() => onToggleGraphPanel?.()}
+          aria-label="Favorite"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          <LayoutPanelLeft className="h-4 w-4" />
-          {isCompactLayout ? (isGraphPanelOpen ? "隐藏图谱" : "显示图谱") : "切换布局"}
+          <Star className="h-4 w-4" />
         </button>
-        <button
-          type="button"
-          aria-label="生成标签"
-          disabled={isGeneratingTags}
-          className="inline-flex h-8 items-center gap-2 rounded-md px-2 text-xs text-muted-foreground transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={onGenerateTags}
-        >
-          <Wand2 className="h-4 w-4" />
-          {isGeneratingTags ? "生成中..." : "生成标签"}
-        </button>
+
         <div className="relative" ref={menuRef}>
           <button
             ref={menuTriggerRef}
             type="button"
-            aria-label="更多操作"
+            aria-label="More actions"
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             onClick={() => setIsMenuOpen((open) => !open)}
           >
             <MoreHorizontal className="h-4 w-4" />
@@ -185,34 +192,33 @@ export function TopBar({
           {isMenuOpen ? (
             <div
               role="menu"
-              aria-label="更多操作菜单"
+              aria-label="More actions menu"
               onKeyDown={handleMenuKeyDown}
-              className="absolute right-0 top-9 z-30 min-w-[140px] rounded-md border bg-card p-1 shadow-md"
+              className="absolute right-0 top-9 z-30 w-56 overflow-hidden rounded-lg border bg-card p-0 shadow-md"
             >
-              <button
-                ref={(element) => {
-                  menuItemRefs.current[0] = element;
-                }}
-                type="button"
-                role="menuitem"
-                className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-xs text-foreground/85 transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                onClick={() => setIsMenuOpen(false)}
-              >
-                <Share2 className="h-4 w-4 text-muted-foreground" />
-                导出
-              </button>
-              <button
-                ref={(element) => {
-                  menuItemRefs.current[1] = element;
-                }}
-                type="button"
-                role="menuitem"
-                className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-xs text-foreground/85 transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                onClick={() => setIsMenuOpen(false)}
-              >
-                <Settings className="h-4 w-4 text-muted-foreground" />
-                设置
-              </button>
+              {actionGroups.map((group, groupIndex) => (
+                <div key={`group-${groupIndex}`} className="border-b last:border-none">
+                  {group.map((action) => {
+                    const actionIndex = flatActions.findIndex((item) => item.label === action.label);
+
+                    return (
+                      <button
+                        key={action.label}
+                        ref={(element) => {
+                          menuItemRefs.current[actionIndex] = element;
+                        }}
+                        type="button"
+                        role="menuitem"
+                        className="flex h-8 w-full items-center gap-2 px-2 text-left text-xs text-foreground/85 transition-colors duration-150 motion-reduce:transition-none hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                        onClick={() => setIsMenuOpen(false)}
+                      >
+                        <action.icon className="h-4 w-4 text-muted-foreground" />
+                        <span>{action.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           ) : null}
         </div>

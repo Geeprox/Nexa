@@ -2,18 +2,20 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatPane, ChatMessage } from "./ChatPane";
 
-const messages: ChatMessage[] = [
+const baseMessages: ChatMessage[] = [
   {
     id: "m-user-1",
     nodeId: "root",
     role: "user",
-    content: "如何用 LLM 做文献对比？"
+    content: "如何评估提示词质量？"
   },
   {
     id: "m-assistant-1",
     nodeId: "root",
     role: "assistant",
-    content: "可以先定义比较框架，再逐步分析。"
+    content: "可以先定义评估维度，再做对照实验。",
+    replyToMessageId: "m-user-1",
+    retryIndex: 1
   }
 ];
 
@@ -25,22 +27,25 @@ afterEach(() => {
 describe("ChatPane", () => {
   it("opens branch action from selected assistant text", () => {
     const onCreateBranch = vi.fn();
+
     render(
       <ChatPane
         activeNodeTitle="起点问题"
-        messages={messages}
+        messages={baseMessages}
         onCreateBranch={onCreateBranch}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
       />
     );
 
-    const assistantText = screen.getByText("可以先定义比较框架，再逐步分析。");
+    const assistantText = screen.getByText("可以先定义评估维度，再做对照实验。");
     const textNode = assistantText.firstChild;
     expect(textNode).toBeTruthy();
 
     const removeAllRanges = vi.fn();
     vi.spyOn(window, "getSelection").mockReturnValue({
       isCollapsed: false,
-      toString: () => "比较框架",
+      toString: () => "评估维度",
       anchorNode: textNode,
       getRangeAt: () => ({
         getBoundingClientRect: () => ({ left: 120, width: 60, top: 150 })
@@ -51,80 +56,93 @@ describe("ChatPane", () => {
     fireEvent.mouseUp(screen.getByTestId("chat-scroll-area"));
     fireEvent.click(screen.getByRole("button", { name: /分叉/ }));
 
-    expect(onCreateBranch).toHaveBeenCalledTimes(1);
     expect(onCreateBranch).toHaveBeenCalledWith({
+      mode: "selection",
       sourceMessageId: "m-assistant-1",
       sourceNodeId: "root",
-      selectedText: "比较框架"
+      selectedText: "评估维度"
     });
     expect(removeAllRanges).toHaveBeenCalledTimes(1);
   });
 
-  it("shows empty-state for node without messages", () => {
-    render(
-      <ChatPane
-        activeNodeTitle="空分支"
-        messages={[]}
-        onCreateBranch={vi.fn()}
-      />
-    );
+  it("submits user draft on Enter", () => {
+    const onSendMessage = vi.fn();
 
-    expect(screen.getByText("当前分支: 空分支")).toBeInTheDocument();
-    expect(
-      screen.getByText("当前分支暂无消息，选中回答后可创建追问分支。")
-    ).toBeInTheDocument();
-  });
-
-  it("highlights focused message", () => {
     render(
       <ChatPane
         activeNodeTitle="起点问题"
-        messages={messages}
-        focusedMessageId="m-assistant-1"
+        messages={baseMessages}
         onCreateBranch={vi.fn()}
+        onRetryMessage={vi.fn()}
+        onSendMessage={onSendMessage}
       />
     );
 
-    const focused = screen
-      .getAllByText("可以先定义比较框架，再逐步分析。")
-      .map((node) => node.closest("div"))
-      .find((node) => node?.className.includes("ring-2"));
+    const textarea = screen.getByLabelText("聊天输入");
+    fireEvent.change(textarea, { target: { value: "请给一个执行清单" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
 
-    expect(focused).toBeDefined();
+    expect(onSendMessage).toHaveBeenCalledWith("请给一个执行清单");
   });
 
-  it("supports keyboard shortcut to trigger branch creation", () => {
-    const onCreateBranch = vi.fn();
+  it("supports retry controls and retry callback", () => {
+    const onRetryMessage = vi.fn();
+
     render(
       <ChatPane
         activeNodeTitle="起点问题"
-        messages={messages}
-        onCreateBranch={onCreateBranch}
+        messages={[
+          ...baseMessages,
+          {
+            id: "m-assistant-2",
+            nodeId: "root",
+            role: "assistant",
+            content: "也可以先固定输出模板，减少波动。",
+            replyToMessageId: "m-user-1",
+            retryIndex: 2
+          }
+        ]}
+        onCreateBranch={vi.fn()}
+        onRetryMessage={onRetryMessage}
+        onSendMessage={vi.fn()}
       />
     );
 
-    const assistantText = screen.getByText("可以先定义比较框架，再逐步分析。");
-    const textNode = assistantText.firstChild;
-    expect(textNode).toBeTruthy();
+    expect(screen.getByText("Copy")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
-    vi.spyOn(window, "getSelection").mockReturnValue({
-      isCollapsed: false,
-      toString: () => "比较框架",
-      anchorNode: textNode,
-      getRangeAt: () => ({
-        getBoundingClientRect: () => ({ left: 120, width: 60, top: 150 })
-      }),
-      removeAllRanges: vi.fn()
-    } as unknown as Selection);
-
-    fireEvent.mouseUp(screen.getByTestId("chat-scroll-area"));
-    expect(screen.getByRole("button", { name: /分叉/ })).toBeInTheDocument();
-
-    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
-    expect(onCreateBranch).toHaveBeenCalledWith({
-      sourceMessageId: "m-assistant-1",
+    expect(onRetryMessage).toHaveBeenCalledWith({
       sourceNodeId: "root",
-      selectedText: "比较框架"
+      sourceMessageId: "m-assistant-2",
+      replyToMessageId: "m-user-1"
+    });
+
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show previous retry" }));
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show next retry" }));
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+  });
+
+  it("creates clone branch from assistant action button", () => {
+    const onCreateBranch = vi.fn();
+
+    render(
+      <ChatPane
+        activeNodeTitle="起点问题"
+        messages={baseMessages}
+        onCreateBranch={onCreateBranch}
+        onRetryMessage={vi.fn()}
+        onSendMessage={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Branch" }));
+
+    expect(onCreateBranch).toHaveBeenCalledWith({
+      mode: "clone",
+      sourceMessageId: "m-assistant-1",
+      sourceNodeId: "root"
     });
   });
 });

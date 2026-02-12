@@ -1,31 +1,31 @@
-# 设计 V1: 高亮笔记与关键词搜索
+# 设计 V1: 高亮笔记与关键词搜索（更新版）
 
-## 架构概要
-- 数据存储: SQLite + FTS5
-- 索引对象: Message, Note, Node.summary
+## 设计目标
+在不干扰当前聊天主流程的前提下，保留笔记与关键词搜索能力的扩展基础。
 
-## 数据模型草案
-- Note { id, title, content, source_node_id, source_message_id, created_at }
-- Highlight { id, note_id, message_id, range_start, range_end, selected_text }
-- Tag { id, name }
-- Tagging { id, tag_id, entity_type, entity_id, source, confidence, created_at }
+## 当前落地策略
+- UI
+  - 侧栏移除顶部搜索输入框。
+  - 保留 `搜索` 与 `全部笔记` 导航项作为一级入口。
+- 数据
+  - 搜索仓储与笔记引用模型继续保留。
+  - 可在后续页面复用现有查询接口。
 
-## 标注写入流程
-1. 用户选中文本，记录 range_start, range_end。
-2. 创建 Highlight。
-3. 自动生成 Note，content 为选中文本 + 上下文摘要。
+## 数据模型（沿用）
+- `Note { id, title, content, source_node_id, source_message_id, created_at }`
+- `Highlight { id, note_id, message_id, range_start, range_end, selected_text }`
+- 搜索索引对象：`Message.content`, `Note.content`, `Node.summary`
 
-## 搜索实现
-- 建立 FTS5 表覆盖 Message.content 与 Note.content。
-- 搜索结果返回引用对象类型与 id。
+## 查询能力
+- 关键词查询逻辑保留在仓储层。
+- 结果对象需包含来源定位信息：
+  - 对话命中：`nodeId + messageId`
+  - 笔记命中：`noteId + sourceNodeId + sourceMessageId`
 
-## 定位策略
-- 对话与节点结果: 跳转到对应节点。
-- 笔记结果: 打开笔记并显示来源。
+## 交互分层
+- V1 当前层：导航入口层（无重复输入）。
+- V2 目标层：独立搜索视图层（输入、筛选、结果定位）。
 
-## 风险控制
-- 消息内容变更导致 range 失效时，采用 selected_text 回退匹配。
-
-## 扩展预留
-- 预留向量索引表。
-- 预留富文本格式字段。
+## 风险与控制
+- 风险：入口存在但搜索面板未完整，用户感知“未完成”。
+- 控制：在 V2 计划中将“独立搜索视图”作为明确切片，并保持已有数据层可复用。

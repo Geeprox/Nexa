@@ -5,6 +5,9 @@ export interface PersistedMessage {
   nodeId: string;
   role: "user" | "assistant";
   content: string;
+  replyToMessageId?: string;
+  retryIndex?: number;
+  isStreaming?: boolean;
 }
 
 export interface PersistedNode {
@@ -68,7 +71,10 @@ function isMessage(value: unknown): value is PersistedMessage {
     typeof value.id === "string" &&
     typeof value.nodeId === "string" &&
     (value.role === "user" || value.role === "assistant") &&
-    typeof value.content === "string"
+    typeof value.content === "string" &&
+    (value.replyToMessageId === undefined || typeof value.replyToMessageId === "string") &&
+    (value.retryIndex === undefined || typeof value.retryIndex === "number") &&
+    (value.isStreaming === undefined || typeof value.isStreaming === "boolean")
   );
 }
 
